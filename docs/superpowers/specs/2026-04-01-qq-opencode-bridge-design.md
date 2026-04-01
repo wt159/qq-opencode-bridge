@@ -1,6 +1,6 @@
 # QQ-OpenCode Bridge 技术设计文档
 
-**版本**: 1.5  
+**版本**: 1.6  
 **日期**: 2026-04-01  
 **状态**: Review 修订完成（可实施）
 
@@ -179,6 +179,23 @@ interface ConcurrencyRule {
   // /abort 归属：只能中断自己发起的任务
   abortOwnOnly: boolean;
 }
+
+// 状态机迁移表
+// from_state       | trigger              | to_state
+// idle             | /run, /oc <cmd>      | running
+// idle             | /abort               | idle (no-op)
+// running          | 完成                  | idle
+// running          | /abort               | aborting → idle
+// running          | 权限请求              | permission_pending
+// running          | 超时                  | idle (发送超时通知)
+// running          | 进程崩溃              | restarting → idle (最多3次)
+// permission_pending | /approve           | running
+// permission_pending | /reject            | idle
+// permission_pending | 超时               | idle
+// aborting         | abort 完成            | idle
+// restarting       | 重启成功              | idle
+// restarting       | 重启失败 (>3次)      | stopped
+// stopped          | /bind (重新绑定)      | idle
 ```
 
 ---
@@ -219,6 +236,8 @@ interface ConcurrencyRule {
 |------|------|------|------|
 | `/run` | `<msg>` | 执行自然语言指令 | `/run 帮我看看这个函数` |
 | `/abort` | - | 中断正在运行的命令 | `/abort` |
+| `/approve` | - | 授权待确认的权限请求（仅 permission_pending 时可用） | `/approve` |
+| `/reject` | - | 拒绝待确认的权限请求（仅 permission_pending 时可用） | `/reject` |
 
 ### 4.5 OpenCode 命令
 
@@ -336,14 +355,15 @@ interface ConcurrencyRule {
    ├─ 同步等待响应（或使用事件订阅）
    └─ 发送结果到 QQ
 
-   Case /approve /reject:
-   ├─ 检查 state = 'permission_pending'
-   ├─ 调用 POST /session/:id/permissions/:permissionID
-   ├─ /approve → response = 'once'
-   ├─ /reject → response = 'reject'
-   ├─ 更新 pendingPermissionId = null
-   ├─ 允许后恢复为 'running'，拒绝后回到 'idle'
-   └─ 发送确认
+    Case /approve /reject:
+    ├─ 检查 state = 'permission_pending'
+    ├─ 调用 POST /session/:id/permissions/:permissionID
+    ├─ /approve → response = 'once'（可选 'always'）
+    ├─ /reject → response = 'reject'
+    ├─ body: { response, remember?: boolean }
+    ├─ 更新 pendingPermissionId = null
+    ├─ 允许后恢复为 'running'，拒绝后回到 'idle'
+    └─ 发送确认
 
 8. 结果返回 (通过 NapCat HTTP API)
    └─ POST /send_private_msg (私聊)
@@ -463,7 +483,7 @@ async function handleOpenCodeCommand(
   // /oc 或 /oc help → 获取命令列表
   if (!command || command === 'help') {
     // GET /command（注意：不是 session.command）
-    const resp = await fetch(`${opencodeUrl}/command`);
+    const resp = await fetch(getOpencodeUrl(session.projectPort!, '/command'));
     const commands = await resp.json();
     await sendReply(qq, formatCommandsList(commands), isGroup, groupId);
     return;
@@ -485,9 +505,9 @@ async function handlePermission(qq: string, approve: boolean, groupId?: number) 
     await sendReply(qq, '当前没有待确认的权限请求', false, groupId);
     return;
   }
-  await sdk.postSessionByIdPermissionsByPermissionId({
+  await client.session.permission({
     path: { id: session.sessionId, permissionID: session.pendingPermissionId! },
-    body: { response: approve ? 'once' : 'reject' }
+    body: { response: approve ? 'once' : 'reject', remember: false }
   });
   session.pendingPermissionId = null;
   session.state = approve ? 'running' : 'idle';
@@ -501,6 +521,24 @@ async function handlePermission(qq: string, approve: boolean, groupId?: number) 
 
 > **注意**：所有 API 均基于 OpenCode 官方文档。本节区分 **server 全局 API** 和 **session 级别 API**。
 
+### 6.0 统一客户端约定
+
+文档中统一使用以下命名约定，避免实现时分叉：
+
+```typescript
+// OpenCode 客户端：统一的 SDK 实例
+// 使用 OpenCode 官方 SDK 或等效的 fetch 包装
+const client = createOpencode({ hostname: '127.0.0.1', port: 3002 });
+
+// opencodeUrl 来源：由启动时分配的端口动态生成
+function getOpencodeUrl(port: number, path: string): string {
+  return `http://127.0.0.1:${port}${path}`;
+}
+
+// 所有 OpenCode API 调用统一通过 client 或 fetch(getOpencodeUrl(port, path))
+// 不要混用 client / sdk / fetch 三种风格
+```
+
 ### 6.1 启动 OpenCode 实例
 
 ```typescript
@@ -509,7 +547,7 @@ import { spawn } from 'child_process';
 import { resolve } from 'path';
 import { existsSync } from 'fs';
 
-function startOpenCode(projectPath: string, port: number, password?: string) {
+function startOpenCode(binaryPath: string, projectPath: string, port: number, password?: string) {
   if (!existsSync(projectPath)) {
     throw new Error(`项目目录不存在: ${projectPath}`);
   }
@@ -519,7 +557,7 @@ function startOpenCode(projectPath: string, port: number, password?: string) {
     ...(password ? { OPENCODE_SERVER_PASSWORD: password } : {}),
   };
 
-  const proc = spawn('opencode', ['serve', '--port', String(port), '--hostname', '127.0.0.1'], {
+  const proc = spawn(binaryPath, ['serve', '--port', String(port), '--hostname', '127.0.0.1'], {
     cwd: projectPath,   // 项目目录通过 cwd 指定，而非 --dir
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -575,16 +613,16 @@ const result = await client.session.command({
 ```typescript
 // GET /command（注意：是 server 全局 API，不是 session.command）
 // 返回该 OpenCode 实例支持的所有 slash commands 列表
-const resp = await fetch(`${opencodeUrl}/command`);
+const resp = await fetch(getOpencodeUrl(port, '/command'));
 const commands = await resp.json();
-// commands: [{ id, name, description }]
+// commands: Command[] = [{ name, description?, agent?, model?, template, subtask? }]
 ```
 
 ### 6.5 模型列表
 
 ```typescript
 // GET /config/providers
-const resp = await fetch(`${opencodeUrl}/config/providers`);
+const resp = await fetch(getOpencodeUrl(port, '/config/providers'));
 const { providers, default: defaults } = await resp.json();
 // providers: [{ id, name, models: [...] }]
 // defaults: { [providerID]: modelID }
@@ -604,9 +642,10 @@ await client.session.abort({
 ```typescript
 // POST /session/:id/permissions/:permissionID
 // Bridge 检测到 permission_pending 时调用
-await sdk.postSessionByIdPermissionsByPermissionId({
+// response: 'once' | 'always' | 'reject'
+await client.session.permission({
   path: { id: sessionId, permissionID: pendingPermissionId },
-  body: { response: 'once' } // 可选: 'always' | 'reject'
+  body: { response: 'once', remember: false }
 });
 ```
 
@@ -634,13 +673,14 @@ await sdk.postSessionByIdPermissionsByPermissionId({
 
 ### 7.2 错误恢复策略
 
-| 场景 | 处理策略 |
-|------|----------|
-| OpenCode 进程崩溃 | 自动重启，最多3次 |
-| NapCat 连接断开 | 自动重连，指数退避 |
-| 命令执行超时 | 发送超时通知，保留现场 |
-| 端口被占用 | 自动选择下一个可用端口 |
-| 忙时收到新命令 | 直接返回 ERR_ALREADY_RUNNING，不进入队列 |
+| 场景 | 处理策略 | 状态迁移 |
+|------|----------|----------|
+| OpenCode 进程崩溃 | 自动重启，最多3次 | running → restarting → idle (或 stopped) |
+| NapCat 连接断开 | 自动重连，指数退避 | 不影响 OpenCode 状态 |
+| 命令执行超时 | 发送超时通知，state 重置为 idle | running → idle |
+| 端口被占用 | 自动选择下一个可用端口 | 启动时处理 |
+| 忙时收到新命令 | 直接返回 ERR_ALREADY_RUNNING，不进入队列 | 保持 running |
+| 权限确认超时 | 发送超时通知，state 重置为 idle | permission_pending → idle |
 
 ---
 
@@ -821,6 +861,7 @@ qq-opencode-bridge/
 
 | 版本 | 日期 | 说明 |
 |------|------|------|
+| 1.6 | 2026-04-01 | **最终修订**：统一客户端命名、修复 binaryPath 硬编码、补全状态机迁移表、修正 GET /command 响应形状、统一权限响应枚举、补 /approve /reject 到命令协议、定义 opencodeUrl 来源 |
 | 1.5 | 2026-04-01 | **重大修订**：修复 API 错误用法（serve --dir, session.command 列命令）、补全消息规范化、多用户并发规则、状态机、权限确认、端口规划、安全要求 |
 | 1.4 | 2026-04-01 | Review 修复：更新架构图、核心功能描述、消息流转中的 OpenCode 命令示例 |
 | 1.3 | 2026-04-01 | 命令路由改用 /oc 前缀区分 OpenCode 命令 |
