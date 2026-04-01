@@ -14,6 +14,7 @@
 
 - 通过 QQ 消息打开和管理多个 OpenCode 项目
 - 支持所有 OpenCode 命令（`/init`, `/init-deep`, `/mcp`, `/ralph-loop` 等）
+- 命令浏览（`/commands` 查看所有 OpenCode 命令）
 - 模型切换（`/modes`）
 - 交互式命令支持（可中断）
 - 多会话管理（一个 QQ 号绑定一个项目）
@@ -193,18 +194,23 @@ interface ProjectInstance {
 | `/run` | `<msg>` | 执行自然语言指令 | `/run 帮我看看这个函数` |
 | `/abort` | - | 中断正在运行的命令 | `/abort` |
 
-### 4.5 OpenCode 命令 (全部支持)
+### 4.5 OpenCode 命令
 
-| 命令 | 说明 | 示例 |
-|------|------|------|
-| `/init` | 初始化项目 | `/init` |
-| `/init-deep` | 深度初始化 | `/init-deep` |
-| `/mcp` | MCP 管理 | `/mcp list` |
-| `/ralph-loop` | Ralph 循环 | `/ralph-loop` |
-| `/handoff` | 交接会话 | `/handoff` |
-| `/start-work` | 开始工作 | `/start-work` |
-| `/refactor` | 重构 | `/refactor` |
-| `/*` | 其他所有命令 | 自动路由到 OpenCode |
+| 命令 | 参数 | 说明 | 示例 |
+|------|------|------|------|
+| `/commands` | - | 列出所有可用的 OpenCode 命令 | `/commands` |
+| `/init` | - | 初始化项目 | `/init` |
+| `/init-deep` | - | 深度初始化 | `/init-deep` |
+| `/mcp` | `[args]` | MCP 管理 | `/mcp list` |
+| `/ralph-loop` | - | Ralph 循环 | `/ralph-loop` |
+| `/handoff` | - | 交接会话 | `/handoff` |
+| `/start-work` | - | 开始工作 | `/start-work` |
+| `/refactor` | - | 重构 | `/refactor` |
+| `/continue` | - | 继续上次会话 | `/continue` |
+| `/skill` | `[args]` | 技能管理 | `/skill list` |
+| `/*` | - | 其他所有命令 | 自动路由到 OpenCode |
+
+**路由策略**：Bridge 命令优先，未知命令自动转发 OpenCode
 
 ### 4.6 进程管理
 
@@ -219,6 +225,7 @@ interface ProjectInstance {
 |------|------|
 | `/help` | 显示帮助 |
 | `/help <cmd>` | 显示特定命令帮助 |
+| `/commands` | 列出所有 OpenCode 可用命令 |
 
 ---
 
@@ -283,26 +290,97 @@ interface ProjectInstance {
    ├─ 设置 isRunning = false
    └─ 发送中断确认
 
-   Case /modes [model]:
-   ├─ 无参数: 调用 GET /config/providers
-   │   └─ 格式化返回模型列表
-   └─ 有参数: 
-       ├─ 验证模型存在
-       ├─ 更新会话状态
-       └─ 发送确认
+    Case /modes [model]:
+    ├─ 无参数: 调用 GET /config/providers
+    │   └─ 格式化返回模型列表
+    └─ 有参数: 
+        ├─ 验证模型存在
+        ├─ 更新会话状态
+        └─ 发送确认
 
-   Case /* (OpenCode 命令):
-   ├─ 解析命令和参数
-   ├─ 调用 POST /session/:id/command
-   ├─ 订阅 SSE 事件流
-   └─ 流式返回结果
+    Case /commands:
+    ├─ 调用 GET /command
+    └─ 格式化返回命令列表
+
+    Case /* (OpenCode 命令):
+    ├─ 解析命令和参数
+    ├─ 调用 POST /session/:id/command
+    ├─ 订阅 SSE 事件流
+    └─ 流式返回结果
 
 7. 结果返回 (通过 NapCat HTTP API)
    └─ POST /send_msg
        body: {
          "user_id": 123456,
          "message": "执行结果..."
-       }
+        }
+        ```
+
+### 5.1 命令路由实现
+
+```typescript
+// Bridge 自己的命令列表
+const BRIDGE_COMMANDS = new Set([
+  'bind', 'unbind', 'status', 'list',
+  'ls', 'new', 'mkdir', 'tree',
+  'modes', 'commands',
+  'run', 'abort',
+  'stop', 'stopall',
+  'help'
+]);
+
+function parseCommand(input: string) {
+  // 匹配 /command 或 /command args 格式
+  const match = input.match(/^\/(\S+)(?:\s+(.*))?$/);
+  if (!match) return null;
+  
+  const [, cmd, args] = match;
+  
+  if (BRIDGE_COMMANDS.has(cmd)) {
+    return { type: 'bridge', command: cmd, args: args || '' };
+  } else {
+    // OpenCode 命令：自动路由
+    return { type: 'opencode', command: cmd, args: args || '' };
+  }
+}
+
+// 路由处理
+async function handleMessage(message: string, qq: string) {
+  const parsed = parseCommand(message);
+  if (!parsed) return;
+  
+  if (parsed.type === 'bridge') {
+    await handleBridgeCommand(parsed.command, parsed.args, qq);
+  } else {
+    await handleOpenCodeCommand(parsed.command, parsed.args, qq);
+  }
+}
+
+// OpenCode 命令处理
+async function handleOpenCodeCommand(command: string, args: string, qq: string) {
+  const session = getSession(qq);
+  if (!session?.sessionId) {
+    await sendMessage(qq, '请先使用 /bind <项目路径> 绑定项目');
+    return;
+  }
+  
+  // 分离命令和参数
+  const parts = `${command} ${args}`.trim().split(/\s+/);
+  const cmd = parts[0];
+  const cmdArgs = parts.slice(1).join(' ');
+  
+  // 调用 OpenCode command API
+  await client.session.command({
+    path: { id: session.sessionId },
+    body: {
+      command: cmd,
+      arguments: cmdArgs
+    }
+  });
+  
+  // 订阅 SSE 事件流并转发到 QQ
+  await streamToQQ(session.sessionId, qq);
+}
 ```
 
 ---
@@ -352,14 +430,21 @@ await client.session.command({
 });
 ```
 
-### 6.4 模型列表
+### 6.4 命令列表
+
+```typescript
+const commands = await client.session.command({ path: { id: sessionId } });
+// commands: [{ id, name, description }]
+```
+
+### 6.5 模型列表
 
 ```typescript
 const { providers, default: defaults } = await client.config.providers();
 // providers: [{ id, name, models: [...] }]
 ```
 
-### 6.5 中断执行
+### 6.6 中断执行
 
 ```typescript
 await client.session.abort({
@@ -561,5 +646,6 @@ qq-opencode-bridge/
 
 | 版本 | 日期 | 说明 |
 |------|------|------|
+| 1.2 | 2026-04-01 | 补充 /commands 命令和命令路由实现代码 |
 | 1.1 | 2026-04-01 | 补充项目浏览与创建命令 (/ls, /new, /mkdir, /tree) |
 | 1.0 | 2026-04-01 | 初始版本 |
