@@ -53,7 +53,7 @@
 │                                                                  │
 │  配置项:                                                         │
 │  - napcat-reverse-ws: ws://localhost:3001 (Bridge WS 服务端口)  │
-│  - access-token: (必填，与 NapCat 端一致)                        │
+│  - access-token: (建议配置，若启用需与 Bridge 端一致)            │
 └──────────────────────────┬───────────────────────────────────────┘
                            │ WebSocket 客户端
                            ▼
@@ -72,7 +72,7 @@
 │  ┌────────────────┐  ┌────────────────┐  │ - /ls, /new    │     │
 │  │ NapCat WS       │  │ OpenCode HTTP   │  │ - /*           │     │
 │  │ - 接收事件     │  │ - REST API      │  └────────────────┘     │
-│  │ (Bridge WS 服务) │  │ - 端口: 3001+  │                        │
+│  │ (Bridge WS 服务) │  │ - 端口: 3002+  │                        │
 │  └────────────────┘  └────────────────┘                        │
 └──────────────────────────┬───────────────────────────────────────┘
                            │
@@ -80,7 +80,7 @@
            ▼                ▼                ▼
      ┌──────────┐    ┌──────────┐    ┌──────────┐
      │OpenCode 1 │    │OpenCode 2 │    │OpenCode N │
-     │ :3001     │    │ :3002     │    │ :3XXX    │
+     │ :3002     │    │ :3003     │    │ :3XXX    │
      │ Session A │    │ Session B │    │ Session N │
      └──────────┘    └──────────┘    └──────────┘
 ```
@@ -122,6 +122,9 @@ interface Config {
     // 命令执行超时 (毫秒)
     commandTimeout: number;
   };
+
+  // 并发策略
+  concurrency: ConcurrencyRule;
   
   // 日志配置
   log: {
@@ -143,6 +146,7 @@ interface QQSession {
   model: string | null;         // 当前模型 (provider/modelID 格式)
   state: SessionState;           // 会话状态机
   runningMessageId: string | null; // 当前正在执行的消息 ID
+  pendingPermissionId: string | null; // 当前待确认的权限请求 ID
   createdAt: Date;
   lastActiveAt: Date;
 }
@@ -166,12 +170,12 @@ interface ProjectInstance {
   status: 'running' | 'stopping' | 'stopped';
 }
 
-// 多用户并发规则
+// 多用户并发规则（当前文档采用“忙时拒绝”模式，不排队）
 interface ConcurrencyRule {
   // 同一项目是否允许多个 QQ 同时绑定
   allowMultiQQPerProject: boolean;
-  // 同一项目的命令是否串行执行
-  serialExecution: boolean;
+  // 同一项目忙时是否直接拒绝新请求
+  rejectWhenBusy: boolean;
   // /abort 归属：只能中断自己发起的任务
   abortOwnOnly: boolean;
 }
@@ -300,7 +304,7 @@ interface ConcurrencyRule {
 
    Case /run <msg>:
    ├─ 检查绑定状态 → 未绑定则拒绝
-   ├─ 检查 state → 非 idle 则拒绝（包含 permission_pending）
+   ├─ 检查 state → 非 idle 则拒绝（当前采用“忙时拒绝”策略，不排队）
    ├─ 设置 state = 'running'
    ├─ 调用 POST /session/:id/message
    ├─ 同步等待响应（或使用 prompt_async + 事件订阅）
@@ -335,20 +339,23 @@ interface ConcurrencyRule {
    Case /approve /reject:
    ├─ 检查 state = 'permission_pending'
    ├─ 调用 POST /session/:id/permissions/:permissionID
-   ├─ 设置 state = 'running' 或 'idle'
+   ├─ /approve → response = 'once'
+   ├─ /reject → response = 'reject'
+   ├─ 更新 pendingPermissionId = null
+   ├─ 允许后恢复为 'running'，拒绝后回到 'idle'
    └─ 发送确认
 
 8. 结果返回 (通过 NapCat HTTP API)
    └─ POST /send_private_msg (私聊)
        body: {
          "user_id": 123456,
-         "message": "执行结果..."
-       }
+         "message": [{ "type": "text", "data": { "text": "执行结果..." } }]
+        }
    └─ POST /send_group_msg (群聊)
        body: {
          "group_id": 789000,
-         "message": "执行结果..."
-       }
+          "message": [{ "type": "text", "data": { "text": "执行结果..." } }]
+        }
 ```
 
 ### 5.1 消息规范化
@@ -385,7 +392,7 @@ function normalizeMessage(event: NapCatMessageEvent): string | null {
 | 规则 | 说明 |
 |------|------|
 | 同一项目允许多个 QQ 绑定 | 是（通过 ProjectInstance.sessions） |
-| 同一项目命令串行执行 | 是（等待队列） |
+| 同一项目忙时新请求 | 直接拒绝，不排队 |
 | /abort 归属 | 只能中断自己发起的任务 |
 | /stop 后其他 QQ | 通知该 QQ 绑定已失效，提示重新 /bind |
 | 权限确认归属 | 谁触发 permission_pending，谁负责 /approve |
@@ -478,11 +485,12 @@ async function handlePermission(qq: string, approve: boolean, groupId?: number) 
     await sendReply(qq, '当前没有待确认的权限请求', false, groupId);
     return;
   }
-  await client.session.permission({
-    path: { id: session.sessionId, permissionId: session.pendingPermissionId },
-    body: { response: approve ? 'allow' : 'deny' }
+  await sdk.postSessionByIdPermissionsByPermissionId({
+    path: { id: session.sessionId, permissionID: session.pendingPermissionId! },
+    body: { response: approve ? 'once' : 'reject' }
   });
-  session.state = 'running';
+  session.pendingPermissionId = null;
+  session.state = approve ? 'running' : 'idle';
   await sendReply(qq, approve ? '已授权' : '已拒绝', false, groupId);
 }
 ```
@@ -596,9 +604,9 @@ await client.session.abort({
 ```typescript
 // POST /session/:id/permissions/:permissionID
 // Bridge 检测到 permission_pending 时调用
-await client.session.permission({
-  path: { id: sessionId, permissionId: pendingPermissionId },
-  body: { response: 'allow', remember: true }
+await sdk.postSessionByIdPermissionsByPermissionId({
+  path: { id: sessionId, permissionID: pendingPermissionId },
+  body: { response: 'once' } // 可选: 'always' | 'reject'
 });
 ```
 
@@ -622,6 +630,7 @@ await client.session.permission({
 | `ERR_DIR_EXISTS` | 目录已存在 | `目录已存在: /path/to/dir` |
 | `ERR_GIT_CLONE_FAILED` | Git 克隆失败 | `克隆失败: xxx，请检查 URL 是否正确` |
 | `ERR_INVALID_PATH` | 无效路径 | `无效的路径: xxx` |
+| `ERR_PERMISSION_PENDING` | 存在待确认权限 | `当前有待确认权限，请使用 /approve 或 /reject` |
 
 ### 7.2 错误恢复策略
 
@@ -631,6 +640,7 @@ await client.session.permission({
 | NapCat 连接断开 | 自动重连，指数退避 |
 | 命令执行超时 | 发送超时通知，保留现场 |
 | 端口被占用 | 自动选择下一个可用端口 |
+| 忙时收到新命令 | 直接返回 ERR_ALREADY_RUNNING，不进入队列 |
 
 ---
 
@@ -714,8 +724,8 @@ qq-opencode-bridge/
 
 ### 9.3 通信安全
 
-- `access-token` **必须**配置（两侧一致）
-- NapCat WS 和 HTTP 均通过 token 鉴权
+- 建议配置 `access-token`；若启用则 NapCat 与 Bridge 两侧必须一致
+- NapCat WS 和 HTTP 在启用 token 时通过同一 token 鉴权
 - OpenCode 服务绑定到 127.0.0.1
 - `/new` 克隆 URL 仅允许 `https://` 开头
 
@@ -747,7 +757,7 @@ qq-opencode-bridge/
   },
   "concurrency": {
     "allowMultiQQPerProject": true,
-    "serialExecution": true,
+    "rejectWhenBusy": true,
     "abortOwnOnly": true
   },
   "log": {
@@ -775,8 +785,9 @@ qq-opencode-bridge/
 
 ### Phase 3: 命令执行
 - [ ] `/run` 命令实现
-- [ ] SSE 流式返回
+- [ ] 同步响应实现（可选扩展：SSE 流式返回）
 - [ ] `/abort` 中断支持
+- [ ] `/approve`、`/reject` 权限确认支持
 
 ### Phase 4: 项目管理功能
 - [ ] `/ls` 列出项目
