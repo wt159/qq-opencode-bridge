@@ -198,19 +198,19 @@ interface ProjectInstance {
 
 | 命令 | 参数 | 说明 | 示例 |
 |------|------|------|------|
-| `/commands` | - | 列出所有可用的 OpenCode 命令 | `/commands` |
-| `/init` | - | 初始化项目 | `/init` |
-| `/init-deep` | - | 深度初始化 | `/init-deep` |
-| `/mcp` | `[args]` | MCP 管理 | `/mcp list` |
-| `/ralph-loop` | - | Ralph 循环 | `/ralph-loop` |
-| `/handoff` | - | 交接会话 | `/handoff` |
-| `/start-work` | - | 开始工作 | `/start-work` |
-| `/refactor` | - | 重构 | `/refactor` |
-| `/continue` | - | 继续上次会话 | `/continue` |
-| `/skill` | `[args]` | 技能管理 | `/skill list` |
-| `/*` | - | 其他所有命令 | 自动路由到 OpenCode |
+| `/oc <cmd>` | OpenCode 命令 | 执行 OpenCode 命令 | `/oc init-deep` |
+| `/oc mcp` | `[args]` | MCP 管理 | `/oc mcp list` |
+| `/oc init` | - | 初始化项目 | `/oc init` |
+| `/oc init-deep` | - | 深度初始化 | `/oc init-deep` |
+| `/oc refactor` | - | 重构 | `/oc refactor` |
+| `/oc ralph-loop` | - | Ralph 循环 | `/oc ralph-loop` |
+| `/oc handoff` | - | 交接会话 | `/oc handoff` |
+| `/oc start-work` | - | 开始工作 | `/oc start-work` |
+| `/oc continue` | - | 继续上次会话 | `/oc continue` |
+| `/oc skill` | `[args]` | 技能管理 | `/oc skill list` |
+| `/oc` | `-help` | 查看 OpenCode 命令帮助 | `/oc -help` |
 
-**路由策略**：Bridge 命令优先，未知命令自动转发 OpenCode
+**路由策略**：使用 `/oc` 前缀明确区分 OpenCode 命令
 
 ### 4.6 进程管理
 
@@ -336,18 +336,29 @@ function parseCommand(input: string) {
   
   const [, cmd, args] = match;
   
+  // OpenCode 命令使用 /oc 前缀
+  if (cmd === 'oc') {
+    const ocArgs = args || '';
+    const parts = ocArgs.trim().split(/\s+/);
+    const ocCmd = parts[0];
+    const ocCmdArgs = parts.slice(1).join(' ');
+    return { type: 'opencode', command: ocCmd, args: ocCmdArgs };
+  }
+  
   if (BRIDGE_COMMANDS.has(cmd)) {
     return { type: 'bridge', command: cmd, args: args || '' };
-  } else {
-    // OpenCode 命令：自动路由
-    return { type: 'opencode', command: cmd, args: args || '' };
   }
+  
+  return null; // 未知命令
 }
 
 // 路由处理
 async function handleMessage(message: string, qq: string) {
   const parsed = parseCommand(message);
-  if (!parsed) return;
+  if (!parsed) {
+    await sendMessage(qq, '未知命令，请输入 /help 查看帮助');
+    return;
+  }
   
   if (parsed.type === 'bridge') {
     await handleBridgeCommand(parsed.command, parsed.args, qq);
@@ -364,17 +375,20 @@ async function handleOpenCodeCommand(command: string, args: string, qq: string) 
     return;
   }
   
-  // 分离命令和参数
-  const parts = `${command} ${args}`.trim().split(/\s+/);
-  const cmd = parts[0];
-  const cmdArgs = parts.slice(1).join(' ');
+  // 处理特殊参数
+  if (command === '-help' || command === 'help') {
+    // 获取 OpenCode 命令列表
+    const commands = await client.session.command({ path: { id: session.sessionId } });
+    await sendMessage(qq, formatCommandsList(commands));
+    return;
+  }
   
   // 调用 OpenCode command API
   await client.session.command({
     path: { id: session.sessionId },
     body: {
-      command: cmd,
-      arguments: cmdArgs
+      command: command,
+      arguments: args
     }
   });
   
@@ -646,6 +660,7 @@ qq-opencode-bridge/
 
 | 版本 | 日期 | 说明 |
 |------|------|------|
+| 1.3 | 2026-04-01 | 命令路由改用 /oc 前缀区分 OpenCode 命令 |
 | 1.2 | 2026-04-01 | 补充 /commands 命令和命令路由实现代码 |
 | 1.1 | 2026-04-01 | 补充项目浏览与创建命令 (/ls, /new, /mkdir, /tree) |
 | 1.0 | 2026-04-01 | 初始版本 |
