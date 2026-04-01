@@ -13,7 +13,7 @@
 ### 1.1 核心功能
 
 - 通过 QQ 消息打开和管理多个 OpenCode 项目
-- 支持所有 OpenCode 命令（`/init`, `/init-deep`, `/mcp`, `/ralph-loop` 等）
+- 支持所有 OpenCode 命令（通过 `/oc` 前缀调用，如 `/oc init-deep`）
 - 命令浏览（`/commands` 查看所有 OpenCode 命令）
 - 模型切换（`/modes`）
 - 交互式命令支持（可中断）
@@ -39,7 +39,7 @@
 │  用户发送: /bind /workspace/project1                              │
 │           /run 帮我看看代码                                        │
 │           /modes claude-3-5-sonnet                              │
-│           /init-deep                                            │
+│           /oc init-deep                                         │
 │           /abort                                                │
 └──────────────────────────┬───────────────────────────────────────┘
                            │ WebSocket (OneBot v11/v12 反向)
@@ -66,22 +66,22 @@
 │  │ - QQ → 项目    │  │ - 项目 → 端口  │  │ - /bind        │     │
 │  │ - QQ → 模型    │  │ - 项目 → PID  │  │ - /run         │     │
 │  │ - QQ → 会话ID  │  │ - 进程生命周期 │  │ - /modes       │     │
-│  └────────────────┘  └────────────────┘  │ - /init-deep   │     │
+│  └────────────────┘  └────────────────┘  │ - /oc <cmd>    │     │
 │                                           │ - /abort        │     │
-│  ┌────────────────┐  ┌────────────────┐  │ - /mcp         │     │
-│  │ NapCat 客户端   │  │ OpenCode 客户端 │  │ - /* (全部)     │     │
+│  ┌────────────────┐  ┌────────────────┐  │ - /ls, /new    │     │
+│  │ NapCat 客户端   │  │ OpenCode 客户端 │  │ - /*           │     │
 │  │ - 发送消息     │  │ - REST API     │  └────────────────┘     │
 │  │ - 获取用户信息  │  │ - SSE 事件     │                        │
 │  └────────────────┘  └────────────────┘                        │
 └──────────────────────────┬───────────────────────────────────────┘
                            │
-          ┌────────────────┼────────────────┐
-          ▼                ▼                ▼
-    ┌──────────┐    ┌──────────┐    ┌──────────┐
-    │OpenCode 1 │    │OpenCode 2 │    │OpenCode N │
-    │ :3001     │    │ :3002     │    │ :3XXX    │
-    │ Session A │    │ Session B │    │ Session N │
-    └──────────┘    └──────────┘    └──────────┘
+           ┌────────────────┼────────────────┐
+           ▼                ▼                ▼
+     ┌──────────┐    ┌──────────┐    ┌──────────┐
+     │OpenCode 1 │    │OpenCode 2 │    │OpenCode N │
+     │ :3001     │    │ :3002     │    │ :3XXX    │
+     │ Session A │    │ Session B │    │ Session N │
+     └──────────┘    └──────────┘    └──────────┘
 ```
 
 ---
@@ -298,15 +298,15 @@ interface ProjectInstance {
         ├─ 更新会话状态
         └─ 发送确认
 
-    Case /commands:
+     Case /commands:
     ├─ 调用 GET /command
     └─ 格式化返回命令列表
 
-    Case /* (OpenCode 命令):
-    ├─ 解析命令和参数
-    ├─ 调用 POST /session/:id/command
-    ├─ 订阅 SSE 事件流
-    └─ 流式返回结果
+     Case /oc <cmd>:
+     ├─ 解析 OpenCode 命令和参数
+     ├─ 调用 POST /session/:id/command
+     ├─ 订阅 SSE 事件流
+     └─ 流式返回结果
 
 7. 结果返回 (通过 NapCat HTTP API)
    └─ POST /send_msg
@@ -636,7 +636,7 @@ qq-opencode-bridge/
 
 ### Phase 5: 完整功能
 - [ ] `/modes` 模型切换
-- [ ] 所有 OpenCode 命令支持
+- [ ] `/oc <cmd>` OpenCode 命令支持
 - [ ] `/list`, `/stop`, `/stopall`
 
 ### Phase 6: 完善
@@ -660,6 +660,7 @@ qq-opencode-bridge/
 
 | 版本 | 日期 | 说明 |
 |------|------|------|
+| 1.4 | 2026-04-01 | Review 修复：更新架构图、核心功能描述、消息流转中的 OpenCode 命令示例 |
 | 1.3 | 2026-04-01 | 命令路由改用 /oc 前缀区分 OpenCode 命令 |
 | 1.2 | 2026-04-01 | 补充 /commands 命令和命令路由实现代码 |
 | 1.1 | 2026-04-01 | 补充项目浏览与创建命令 (/ls, /new, /mkdir, /tree) |
