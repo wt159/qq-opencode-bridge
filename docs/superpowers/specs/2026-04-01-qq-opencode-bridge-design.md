@@ -167,21 +167,33 @@ interface ProjectInstance {
 | `/status` | - | 查看当前绑定状态 | `/status` |
 | `/list` | - | 列出所有运行中的项目 | `/list` |
 
-### 4.2 模型切换
+### 4.2 项目浏览与管理
+
+| 命令 | 参数 | 说明 | 示例 | 返回示例 |
+|------|------|------|------|----------|
+| `/ls` | - | 列出 workspaceRoot 下所有项目 | `/ls` | `项目列表:\n1. soundbridge\n2. api-server\n3. web-frontend` |
+| `/ls` | `<path>` | 列出指定目录下的项目 | `/ls /home/wtp` | `项目列表:\n1. workspace/soundbridge\n2. workspace/api-server` |
+| `/new` | `<name>` | 新建空项目（mkdir + git init） | `/new my-project` | `✅ 项目已创建: /workspace/my-project` |
+| `/new` | `<url> <name>` | 从 Git 克隆项目 | `/new https://github.com/user/repo my-project` | `✅ 项目已克隆: /workspace/my-project` |
+| `/mkdir` | `<path>` | 创建目录 | `/mkdir new-feature` | `✅ 目录已创建: /workspace/project/new-feature` |
+| `/tree` | - | 显示项目目录树（当前绑定项目） | `/tree` | 返回目录结构 |
+| `/tree` | `<path>` | 显示指定项目的目录树 | `/tree /workspace/project` | 返回目录结构 |
+
+### 4.3 模型切换
 
 | 命令 | 参数 | 说明 | 示例 |
 |------|------|------|------|
 | `/modes` | - | 列出所有可用模型 | `/modes` |
 | `/modes` | `<name>` | 切换当前模型 | `/modes claude-3-5-sonnet` |
 
-### 4.3 代码执行
+### 4.4 代码执行
 
 | 命令 | 参数 | 说明 | 示例 |
 |------|------|------|------|
 | `/run` | `<msg>` | 执行自然语言指令 | `/run 帮我看看这个函数` |
 | `/abort` | - | 中断正在运行的命令 | `/abort` |
 
-### 4.4 OpenCode 命令 (全部支持)
+### 4.5 OpenCode 命令 (全部支持)
 
 | 命令 | 说明 | 示例 |
 |------|------|------|
@@ -194,14 +206,14 @@ interface ProjectInstance {
 | `/refactor` | 重构 | `/refactor` |
 | `/*` | 其他所有命令 | 自动路由到 OpenCode |
 
-### 4.5 进程管理
+### 4.6 进程管理
 
 | 命令 | 参数 | 说明 | 示例 |
 |------|------|------|------|
 | `/stop` | `<path>` | 关闭指定项目 | `/stop /home/wtp/workspace/project` |
 | `/stopall` | - | 关闭所有项目 | `/stopall` |
 
-### 4.6 帮助
+### 4.7 帮助
 
 | 命令 | 说明 |
 |------|------|
@@ -372,6 +384,9 @@ await client.session.abort({
 | `ERR_MODEL_NOT_FOUND` | 模型不存在 | `模型不存在: xxx，可用 /modes 查看` |
 | `ERR_UNKNOWN_CMD` | 未知命令 | `未知命令，请输入 /help 查看` |
 | `ERR_NOT_WHITELIST` | 不在白名单 | (静默) |
+| `ERR_DIR_EXISTS` | 目录已存在 | `目录已存在: /path/to/dir` |
+| `ERR_GIT_CLONE_FAILED` | Git 克隆失败 | `克隆失败: xxx，请检查 URL 是否正确` |
+| `ERR_INVALID_PATH` | 无效路径 | `无效的路径: xxx` |
 
 ### 7.2 错误恢复策略
 
@@ -407,6 +422,12 @@ qq-opencode-bridge/
 │   │   │                       # - 解析命令前缀
 │   │   │                       # - 参数提取
 │   │   │                       # - 路由到处理函数
+│   │   │
+│   │   ├── filesystem.ts       # 文件系统操作
+│   │   │                       # - /ls 列出项目
+│   │   │                       # - /new 新建项目 (mkdir + git clone/init)
+│   │   │                       # - /mkdir 创建目录
+│   │   │                       # - /tree 显示目录树
 │   │   │
 │   │   └── whitelist.ts       # 白名单验证
 │   │                           # - QQ 号验证
@@ -508,12 +529,18 @@ qq-opencode-bridge/
 - [ ] SSE 流式返回
 - [ ] `/abort` 中断支持
 
-### Phase 4: 完整功能
+### Phase 4: 项目管理功能
+- [ ] `/ls` 列出项目
+- [ ] `/new` 新建项目 (mkdir + git clone/init)
+- [ ] `/mkdir` 创建目录
+- [ ] `/tree` 显示目录树
+
+### Phase 5: 完整功能
 - [ ] `/modes` 模型切换
 - [ ] 所有 OpenCode 命令支持
 - [ ] `/list`, `/stop`, `/stopall`
 
-### Phase 5: 完善
+### Phase 6: 完善
 - [ ] 错误处理完善
 - [ ] 日志系统
 - [ ] 进程监控与恢复
@@ -534,4 +561,5 @@ qq-opencode-bridge/
 
 | 版本 | 日期 | 说明 |
 |------|------|------|
+| 1.1 | 2026-04-01 | 补充项目浏览与创建命令 (/ls, /new, /mkdir, /tree) |
 | 1.0 | 2026-04-01 | 初始版本 |
