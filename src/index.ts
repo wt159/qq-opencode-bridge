@@ -44,6 +44,7 @@ async function main() {
       switch (parsed.command) {
         case 'bind': await handlers.handleBind(qq, parsed.args, isGroup, groupId); break;
         case 'unbind': await handlers.handleUnbind(qq, isGroup, groupId); break;
+        case 'switch': await handlers.handleSwitch(qq, parsed.args, isGroup, groupId); break;
         case 'status': await handlers.handleStatus(qq, isGroup, groupId); break;
         case 'list': await handlers.handleList(qq, isGroup, groupId); break;
         case 'run': await handlers.handleRun(qq, parsed.args, isGroup, groupId); break;
@@ -94,7 +95,8 @@ async function main() {
         case 'help': {
           const help = `可用命令:
 /bind <path> - 绑定项目
-/unbind - 解除绑定
+/unbind <path> - 解除绑定并关闭项目
+/switch <path> - 切换项目
 /status - 查看状态
 /list - 列出运行中的项目
 /ls [path] - 列出项目目录

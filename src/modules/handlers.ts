@@ -9,6 +9,16 @@ import { NapCatService } from '../services/napcat.js';
 import { validateProjectPath } from './whitelist.js';
 import { info } from '../utils/logger.js';
 
+type OpenCodeProviderModel = {
+  id: string;
+  name: string;
+};
+
+type OpenCodeProvider = {
+  id: string;
+  models: Record<string, OpenCodeProviderModel> | OpenCodeProviderModel[];
+};
+
 export class BridgeHandlers {
   constructor(
     private config: Config,
@@ -21,6 +31,63 @@ export class BridgeHandlers {
     const s = this.sessions.getOrCreate(qq);
     if (!s.projectPort) throw new BridgeError('ERR_NO_BIND', '请先使用 /bind <项目路径> 绑定项目');
     return new OpenCodeClient(s.projectPort, this.config.opencode.password);
+  }
+
+  private toModelId(model: string | null): { providerID: string; modelID: string } | undefined {
+    if (!model) return undefined;
+    const [providerID, ...rest] = model.split('/');
+    if (!providerID || rest.length === 0) return undefined;
+    return { providerID, modelID: rest.join('/') };
+  }
+
+  private async resolveRunModel(qq: string): Promise<{ providerID: string; modelID: string } | undefined> {
+    const session = this.sessions.getOrCreate(qq);
+    const explicitModel = this.toModelId(session.model);
+    if (explicitModel) return explicitModel;
+
+    return this.resolveDefaultRunModel(session.projectPort);
+  }
+
+  private async resolveDefaultRunModel(port: number | null): Promise<{ providerID: string; modelID: string } | undefined> {
+    if (!port) return undefined;
+
+    const client = new OpenCodeClient(port, this.config.opencode.password);
+    const { providers, default: defaultModels } = await client.getProviders();
+    const defaultModelID = defaultModels.opencode;
+    if (defaultModelID) {
+      return { providerID: 'opencode', modelID: defaultModelID };
+    }
+
+    let opencodeProvider: OpenCodeProvider | undefined;
+    for (const provider of providers) {
+      if (provider.id === 'opencode') {
+        opencodeProvider = provider;
+        break;
+      }
+    }
+    if (!opencodeProvider) return undefined;
+
+    const models = Array.isArray(opencodeProvider.models)
+      ? opencodeProvider.models
+      : Object.values(opencodeProvider.models);
+
+    const firstModel = models[0];
+    return firstModel ? { providerID: opencodeProvider.id, modelID: firstModel.id } : undefined;
+  }
+
+  private extractEventText(event: { type: string; properties?: unknown }): string | null {
+    const props = event.properties as {
+      part?: { type?: string; text?: string };
+      error?: { data?: { message?: string } };
+      status?: { type?: string };
+    } | undefined;
+
+    if (event.type === 'message.part.updated') {
+      const part = props?.part;
+      if (part?.type === 'text' && part.text) return part.text;
+    }
+
+    return null;
   }
 
   private async reply(qq: string, text: string, isGroup: boolean, groupId?: number) {
@@ -44,44 +111,43 @@ export class BridgeHandlers {
         return this.reply(qq, `项目不存在: ${resolved}`, isGroup, groupId);
       }
 
-      let instance = this.processes.getInstance(resolved);
-      let port: number;
+       let instance = this.processes.getInstance(resolved);
+       let port: number = this.processes.allocatePort();
 
-      if (instance) {
-        port = instance.port;
-      } else {
-        // Try to discover existing OpenCode instances in port range
-        const [minPort, maxPort] = this.config.opencode.portRange;
-        let discovered = false;
-        for (let p = minPort; p <= maxPort; p++) {
-          try {
-            const probe = new OpenCodeClient(p, this.config.opencode.password);
-            if (await probe.isHealthy()) {
-              const sessions = await probe.listSessions();
-              if (sessions.length > 0) {
-                const dir = sessions[0].directory;
-                if (dir === resolved) {
-                  port = p;
-                  discovered = true;
-                  this.processes.addInstance(resolved, p, 0);
-                  instance = this.processes.getInstance(resolved);
-                  break;
-                }
-              }
-            }
-          } catch { /* port not running OpenCode */ }
-        }
+       if (instance) {
+         port = instance.port;
+       } else {
+         // Try to discover existing OpenCode instances in port range
+         const [minPort, maxPort] = this.config.opencode.portRange;
+         let discovered = false;
+         for (let p = minPort; p <= maxPort; p++) {
+           try {
+             const probe = new OpenCodeClient(p, this.config.opencode.password);
+             if (await probe.isHealthy()) {
+               const sessions = await probe.listSessions();
+               if (sessions.length > 0) {
+                 const dir = sessions[0].directory;
+                 if (dir === resolved) {
+                   port = p;
+                   discovered = true;
+                   this.processes.addInstance(resolved, p, 0);
+                   instance = this.processes.getInstance(resolved);
+                   break;
+                 }
+               }
+             }
+           } catch { /* port not running OpenCode */ }
+         }
 
-        if (!discovered) {
-          port = this.processes.allocatePort();
-          instance = await this.processes.startInstance(
-            this.config.opencode.binaryPath,
-            resolved,
-            port,
-            this.config.opencode.password,
-          );
-        }
-      }
+         if (!discovered) {
+           instance = await this.processes.startInstance(
+             this.config.opencode.binaryPath,
+             resolved,
+             port,
+             this.config.opencode.password,
+           );
+         }
+       }
 
       const client = new OpenCodeClient(port, this.config.opencode.password);
       let ready = false;
@@ -107,8 +173,60 @@ export class BridgeHandlers {
   }
 
   async handleUnbind(qq: string, isGroup: boolean, groupId?: number): Promise<void> {
+    const session = this.sessions.getOrCreate(qq);
+    const projectPath = session.projectPath;
     this.sessions.unbind(qq);
+
+    if (!projectPath) {
+      return this.reply(qq, '已解除绑定', isGroup, groupId);
+    }
+
+    const instance = this.processes.getInstance(projectPath);
+    if (instance) {
+      instance.sessions.delete(qq);
+      if (instance.sessions.size === 0) {
+        this.processes.stopInstance(projectPath);
+        return this.reply(qq, '已解除绑定，项目已关闭', isGroup, groupId);
+      }
+    }
+
     return this.reply(qq, '已解除绑定', isGroup, groupId);
+  }
+
+  async handleSwitch(qq: string, args: string, isGroup: boolean, groupId?: number): Promise<void> {
+    const projectPath = args.trim();
+    if (!projectPath) {
+      return this.reply(qq, '用法: /switch <项目路径>', isGroup, groupId);
+    }
+
+    try {
+      const resolved = validateProjectPath(projectPath, this.config.workspaceRoot);
+      const targetInstance = this.processes.getInstance(resolved);
+      if (!targetInstance) {
+        return this.reply(qq, `项目未运行: ${resolved}`, isGroup, groupId);
+      }
+
+      const current = this.sessions.getOrCreate(qq);
+      const previousPath = current.projectPath;
+
+      if (previousPath === resolved) {
+        return this.reply(qq, `已在当前项目: ${resolved}`, isGroup, groupId);
+      }
+
+      if (previousPath) {
+        const previousInstance = this.processes.getInstance(previousPath);
+        previousInstance?.sessions.delete(qq);
+      }
+
+      const client = new OpenCodeClient(targetInstance.port, this.config.opencode.password);
+      const session = await client.createSession(`QQ-${qq}`);
+      this.sessions.bindProject(qq, resolved, targetInstance.port, session.id);
+      targetInstance.sessions.add(qq);
+
+      return this.reply(qq, `已切换到: ${resolved}`, isGroup, groupId);
+    } catch (e) {
+      return this.reply(qq, `切换失败: ${e instanceof Error ? e.message : String(e)}`, isGroup, groupId);
+    }
   }
 
   async handleStatus(qq: string, isGroup: boolean, groupId?: number): Promise<void> {
@@ -141,43 +259,84 @@ export class BridgeHandlers {
     if (s.state !== 'idle') return this.reply(qq, '当前有命令正在执行，请稍后或使用 /abort 中断', isGroup, groupId);
 
     s.state = 'running';
+    await this.reply(qq, '正在执行...', isGroup, groupId);
+    
     try {
       const client = this.getClient(qq);
-      const model = s.model ? (() => {
-        const parts = s.model!.split('/');
-        return { providerID: parts[0], modelID: parts.slice(1).join('/') };
-      })() : undefined;
-
-      // Subscribe to SSE events first
+      const model = await this.resolveRunModel(qq);
       const events = client.subscribeEvents(s.sessionId!);
+      const eventIterator = events[Symbol.asyncIterator]();
+      const firstEventPromise = eventIterator.next();
 
-      // Send the message (async, returns immediately)
-      await client.sendMessage(s.sessionId!, args, model);
-
-      // Collect response from SSE
+      let responseReady = false;
       let text = '';
-      let completed = false;
+      let lastError: string | null = null;
+      const timeoutMs = Math.max(this.config.opencode.commandTimeout, 30 * 60 * 1000);
       const timeout = setTimeout(() => {
-        if (!completed) {
+        if (!responseReady) {
           events.controller.abort();
           s.state = 'idle';
-          this.reply(qq, '命令执行超时 (60s)', isGroup, groupId);
+          this.reply(qq, '命令执行超时，请稍后重试', isGroup, groupId);
         }
-      }, 60000);
+      }, timeoutMs);
 
-      for await (const event of events) {
-        if (event.type === 'session.message.delta' || event.type === 'session.message') {
-          const content = event.data?.parts?.find((p: { type: string }) => p.type === 'text')?.text;
-          if (content) text += content;
-        }
-        if (event.type === 'session.completed' || event.type === 'session.error') {
-          completed = true;
-          clearTimeout(timeout);
-          break;
+      const sendWithModel = async (currentModel: { providerID: string; modelID: string } | undefined) => {
+        await client.sendMessage(s.sessionId!, args, currentModel, events.controller.signal);
+      };
+
+      try {
+        await sendWithModel(model);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        if (message.includes('Model not found')) {
+          const fallbackModel = await this.resolveDefaultRunModel(s.projectPort);
+          if (fallbackModel && (!model || model.providerID !== fallbackModel.providerID || model.modelID !== fallbackModel.modelID)) {
+            s.model = `${fallbackModel.providerID}/${fallbackModel.modelID}`;
+            await sendWithModel(fallbackModel);
+          } else {
+            throw e;
+          }
+        } else {
+          throw e;
         }
       }
 
+      try {
+        let next = await firstEventPromise;
+        while (!next.done) {
+          const event = next.value;
+          if (event.type === 'message.part.updated') {
+            const content = this.extractEventText(event);
+            if (content) text += content;
+          }
+          if (event.type === 'session.error') {
+            const props = event.properties as { error?: { data?: { message?: string } } } | undefined;
+            lastError = props?.error?.data?.message || 'OpenCode 执行失败';
+            responseReady = true;
+            clearTimeout(timeout);
+            break;
+          }
+          if (event.type === 'session.status') {
+            const props = event.properties as { status?: { type?: string } } | undefined;
+            if (props?.status?.type === 'idle') {
+              responseReady = true;
+              clearTimeout(timeout);
+              break;
+            }
+          }
+          next = await eventIterator.next();
+        }
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        if (!lastError) lastError = message;
+      } finally {
+        events.controller.abort();
+      }
+
       s.state = 'idle';
+      if (lastError) {
+        return this.reply(qq, `执行失败: ${lastError}`, isGroup, groupId);
+      }
       return this.reply(qq, text || '(无输出)', isGroup, groupId);
     } catch (e) {
       s.state = 'idle';
@@ -208,9 +367,11 @@ export class BridgeHandlers {
       const { providers } = await client.getProviders();
       const lines = ['可用模型:'];
       for (const p of providers) {
-        const models = Array.isArray(p.models) ? p.models : Object.values(p.models || {});
+        const models = Array.isArray(p.models)
+          ? p.models
+          : (Object.values(p.models) as OpenCodeProviderModel[]);
         for (const m of models) {
-          const modelId = (m as { id?: string }).id || m;
+          const modelId = m.id;
           lines.push(`- ${p.id}/${modelId}`);
         }
       }
@@ -220,10 +381,11 @@ export class BridgeHandlers {
     const { providers } = await client.getProviders();
     const allModels: string[] = [];
     for (const p of providers) {
-      const models = Array.isArray(p.models) ? p.models : Object.values(p.models || {});
+      const models = Array.isArray(p.models)
+        ? p.models
+        : (Object.values(p.models) as OpenCodeProviderModel[]);
       for (const m of models) {
-        const modelId = (m as { id?: string }).id || m;
-        allModels.push(`${p.id}/${modelId}`);
+        allModels.push(`${p.id}/${m.id}`);
       }
     }
     if (!allModels.includes(args.trim())) {

@@ -16,6 +16,7 @@
 - 支持 OpenCode server 暴露的 slash commands（通过 `/oc` 前缀调用），命令列表通过 `/commands` 动态发现
 - 命令浏览（`/commands` 查看当前实例支持的 OpenCode 命令）
 - 模型切换（`/modes`）
+- 项目切换（`/switch <path>` 切换到已运行的 OpenCode 项目）
 - 交互式命令支持（可中断，可授权）
 - 多会话管理（一个 QQ 号绑定一个项目，支持多 QQ 共享同一项目）
 
@@ -207,7 +208,8 @@ interface ConcurrencyRule {
 | 命令 | 参数 | 说明 | 示例 |
 |------|------|------|------|
 | `/bind` | `<path>` | 绑定 QQ 会话到项目 | `/bind /home/wtp/workspace/project` |
-| `/unbind` | - | 解除绑定 | `/unbind` |
+| `/unbind` | `<path>` | 解除指定项目绑定并关闭项目 | `/unbind cosmos` |
+| `/switch` | `<path>` | 切换当前 QQ 会话到另一个已运行项目 | `/switch cosmos` |
 | `/status` | - | 查看当前绑定状态 | `/status` |
 | `/list` | - | 列出所有运行中的项目 | `/list` |
 
@@ -821,7 +823,7 @@ qq-opencode-bridge/
 - [ ] OpenCode 进程启动
 - [ ] OpenCode API 客户端
 - [ ] Session 管理
-- [ ] 基础 `/bind`, `/unbind`, `/status`
+- [ ] 基础 `/bind`, `/unbind <path>`, `/switch <path>`, `/status`
 
 ### Phase 3: 命令执行
 - [ ] `/run` 命令实现

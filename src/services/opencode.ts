@@ -1,3 +1,13 @@
+export type OpenCodeEvent = {
+  type: string;
+  properties?: {
+    sessionID?: string;
+    status?: { type: string };
+    part?: { type: string; text?: string };
+    error?: { name?: string; data?: { message?: string } };
+  };
+};
+
 export class OpenCodeClient {
   private baseUrl: string;
   private password?: string;
@@ -15,33 +25,46 @@ export class OpenCodeClient {
     return headers;
   }
 
-  private async request<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
+  private async request<T>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal): Promise<T> {
     const url = `${this.baseUrl}${path}`;
     const opts: RequestInit = {
       method,
       headers: this.getHeaders(),
+      signal,
     };
     if (body) {
       opts.body = JSON.stringify(body);
     }
     const resp = await fetch(url, opts);
     if (!resp.ok) {
-      throw new Error(`OpenCode API error: ${resp.status} ${resp.statusText} for ${method} ${path}`);
+      const text = await resp.text();
+      throw new Error(`OpenCode API error: ${resp.status} ${resp.statusText} for ${method} ${path}. Body: ${text}`);
     }
     if (resp.status === 204) return undefined as T;
-    return resp.json() as Promise<T>;
+    const text = await resp.text();
+    if (!text) return undefined as T;
+    try {
+      return JSON.parse(text) as T;
+    } catch (e) {
+      throw new Error(`Failed to parse JSON response: ${text}. Error: ${e}`);
+    }
   }
 
   async createSession(title?: string): Promise<{ id: string }> {
     return this.request('/session', 'POST', { title });
   }
 
-  async sendMessage(sessionId: string, text: string, model?: { providerID: string; modelID: string }): Promise<{ parts: { type: string; text?: string }[] }> {
+  async sendMessage(
+    sessionId: string,
+    text: string,
+    model?: { providerID: string; modelID: string },
+    signal?: AbortSignal,
+  ): Promise<{ parts: { type: string; text?: string }[] }> {
     const body: Record<string, unknown> = {
       parts: [{ type: 'text', text }],
     };
     if (model) body.model = model;
-    return this.request(`/session/${sessionId}/message`, 'POST', body);
+    return this.request(`/session/${sessionId}/message`, 'POST', body, signal);
   }
 
   async sendCommand(sessionId: string, command: string, args: string): Promise<{ parts: { type: string; text?: string }[] }> {
@@ -60,7 +83,7 @@ export class OpenCodeClient {
     return this.request('/session');
   }
 
-  async getProviders(): Promise<{ providers: { id: string; name: string; models: Record<string, { id: string; name: string }> | { id: string; name: string }[] }; default: Record<string, string> }> {
+  async getProviders(): Promise<{ providers: { id: string; name: string; models: Record<string, { id: string; name: string }> | { id: string; name: string }[] }[]; default: Record<string, string> }> {
     return this.request('/config/providers');
   }
 
@@ -77,7 +100,7 @@ export class OpenCodeClient {
     }
   }
 
-  subscribeEvents(sessionId: string): AsyncIterableIterator<{ type: string; data?: unknown }> & { controller: AbortController } {
+  subscribeEvents(sessionId: string): AsyncIterableIterator<OpenCodeEvent> & { controller: AbortController } {
     const controller = new AbortController();
     const url = `${this.baseUrl}/event`;
 
@@ -97,22 +120,23 @@ export class OpenCodeClient {
           if (done) break;
 
           buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
+          const lines = buffer.split(/\r?\n/);
           buffer = lines.pop() || '';
 
           for (const line of lines) {
-            if (line.startsWith('event: ')) {
-              const eventType = line.slice(7).trim();
-              // Read next line for data
-              const dataLine = lines.shift();
-              if (dataLine?.startsWith('data: ')) {
-                try {
-                  const data = JSON.parse(dataLine.slice(6));
-                  if (data.sessionId === sessionId || !data.sessionId) {
-                    yield { type: eventType, data };
-                  }
-                } catch { /* skip invalid JSON */ }
+            const trimmed = line.trim();
+            if (!trimmed.startsWith('data: ')) continue;
+
+            const dataStr = trimmed.slice(6).trim();
+            if (!dataStr) continue;
+
+            try {
+              const data = JSON.parse(dataStr) as OpenCodeEvent;
+              if (!data.properties?.sessionID || data.properties.sessionID === sessionId) {
+                yield data;
               }
+            } catch {
+              continue;
             }
           }
         }

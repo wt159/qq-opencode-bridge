@@ -105,12 +105,15 @@ npm run typecheck
 - 修改执行链路时，确保成功/失败都能正确回收状态。
 - 涉及 SSE/超时/中断时，必须释放资源（如 AbortController）。
 - 不要擅自改变命令协议（尤其 `/oc` 与桥接命令边界）。
+- `/unbind <path>` 和 `/switch <path>` 是**项目级**命令：不要把它们实现成“解绑 QQ 账号”的全局操作。
+- 涉及项目切换/解绑时，同时检查 `SessionManager` 与 `ProcessManager` 的状态一致性，避免出现“已切换但实例未更新”或“已解绑但进程仍在运行”的情况。
 
 ## 7) 测试约定
 - 测试位于 `tests/*.test.ts`。
 - 修改 `src/modules/*.ts` 时优先补对应测试。
 - bugfix 必须先加失败测试再修复实现。
 - 不允许通过删除/弱化测试来“制造通过”。
+- 新增或变更命令语义时，必须补 `tests/command.test.ts`（解析/路由）和至少一个 `handlers` 级测试（真实状态变更）。
 
 ## 8) 配置约定
 - 默认配置：`config.json`。

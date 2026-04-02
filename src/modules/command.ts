@@ -1,7 +1,7 @@
 import type { NapCatMessageSegment, ParsedCommand } from '../types.js';
 
 const BRIDGE_COMMANDS = new Set([
-  'bind', 'unbind', 'status', 'list',
+  'bind', 'unbind', 'switch', 'status', 'list',
   'ls', 'new', 'mkdir', 'tree',
   'modes', 'commands',
   'run', 'abort',
