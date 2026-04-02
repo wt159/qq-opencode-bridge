@@ -45,17 +45,45 @@ export class BridgeHandlers {
       }
 
       let instance = this.processes.getInstance(resolved);
-      if (!instance) {
-        const port = this.processes.allocatePort();
-        instance = await this.processes.startInstance(
-          this.config.opencode.binaryPath,
-          resolved,
-          port,
-          this.config.opencode.password,
-        );
+      let port: number;
+
+      if (instance) {
+        port = instance.port;
+      } else {
+        // Try to discover existing OpenCode instances in port range
+        const [minPort, maxPort] = this.config.opencode.portRange;
+        let discovered = false;
+        for (let p = minPort; p <= maxPort; p++) {
+          try {
+            const probe = new OpenCodeClient(p, this.config.opencode.password);
+            if (await probe.isHealthy()) {
+              const sessions = await probe.listSessions();
+              if (sessions.length > 0) {
+                const dir = sessions[0].directory;
+                if (dir === resolved) {
+                  port = p;
+                  discovered = true;
+                  this.processes.addInstance(resolved, p, 0);
+                  instance = this.processes.getInstance(resolved);
+                  break;
+                }
+              }
+            }
+          } catch { /* port not running OpenCode */ }
+        }
+
+        if (!discovered) {
+          port = this.processes.allocatePort();
+          instance = await this.processes.startInstance(
+            this.config.opencode.binaryPath,
+            resolved,
+            port,
+            this.config.opencode.password,
+          );
+        }
       }
 
-      const client = new OpenCodeClient(instance.port, this.config.opencode.password);
+      const client = new OpenCodeClient(port, this.config.opencode.password);
       let ready = false;
       for (let i = 0; i < 30; i++) {
         if (await client.isHealthy()) { ready = true; break; }
@@ -66,8 +94,8 @@ export class BridgeHandlers {
       }
 
       const session = await client.createSession(`QQ-${qq}`);
-      this.sessions.bindProject(qq, resolved, instance.port, session.id);
-      instance.sessions.add(qq);
+      this.sessions.bindProject(qq, resolved, port, session.id);
+      if (instance) instance.sessions.add(qq);
 
       return this.reply(qq, `已绑定: ${resolved}`, isGroup, groupId);
     } catch (e) {
@@ -119,8 +147,36 @@ export class BridgeHandlers {
         const parts = s.model!.split('/');
         return { providerID: parts[0], modelID: parts.slice(1).join('/') };
       })() : undefined;
-      const result = await client.sendMessage(s.sessionId!, args, model);
-      const text = result.parts.map(p => p.type === 'text' ? p.text : '').filter(Boolean).join('\n');
+
+      // Subscribe to SSE events first
+      const events = client.subscribeEvents(s.sessionId!);
+
+      // Send the message (async, returns immediately)
+      await client.sendMessage(s.sessionId!, args, model);
+
+      // Collect response from SSE
+      let text = '';
+      let completed = false;
+      const timeout = setTimeout(() => {
+        if (!completed) {
+          events.controller.abort();
+          s.state = 'idle';
+          this.reply(qq, '命令执行超时 (60s)', isGroup, groupId);
+        }
+      }, 60000);
+
+      for await (const event of events) {
+        if (event.type === 'session.message.delta' || event.type === 'session.message') {
+          const content = event.data?.parts?.find((p: { type: string }) => p.type === 'text')?.text;
+          if (content) text += content;
+        }
+        if (event.type === 'session.completed' || event.type === 'session.error') {
+          completed = true;
+          clearTimeout(timeout);
+          break;
+        }
+      }
+
       s.state = 'idle';
       return this.reply(qq, text || '(无输出)', isGroup, groupId);
     } catch (e) {
@@ -152,15 +208,24 @@ export class BridgeHandlers {
       const { providers } = await client.getProviders();
       const lines = ['可用模型:'];
       for (const p of providers) {
-        for (const m of p.models) {
-          lines.push(`- ${p.id}/${m.id}`);
+        const models = Array.isArray(p.models) ? p.models : Object.values(p.models || {});
+        for (const m of models) {
+          const modelId = (m as { id?: string }).id || m;
+          lines.push(`- ${p.id}/${modelId}`);
         }
       }
       return this.reply(qq, lines.join('\n'), isGroup, groupId);
     }
 
     const { providers } = await client.getProviders();
-    const allModels = providers.flatMap(p => p.models.map(m => `${p.id}/${m.id}`));
+    const allModels: string[] = [];
+    for (const p of providers) {
+      const models = Array.isArray(p.models) ? p.models : Object.values(p.models || {});
+      for (const m of models) {
+        const modelId = (m as { id?: string }).id || m;
+        allModels.push(`${p.id}/${modelId}`);
+      }
+    }
     if (!allModels.includes(args.trim())) {
       return this.reply(qq, `模型不存在: ${args.trim()}`, isGroup, groupId);
     }

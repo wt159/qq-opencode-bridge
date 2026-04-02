@@ -58,12 +58,12 @@ export class NapCatService {
       headers['Authorization'] = `Bearer ${this.config.napcat.token}`;
     }
 
-    const body = { action, params };
     debug('NapCat API call', action, params);
 
-    const resp = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+    const resp = await fetch(url, { method: 'POST', headers, body: JSON.stringify(params) });
     if (!resp.ok) {
-      throw new Error(`NapCat API error: ${resp.status} ${resp.statusText}`);
+      const text = await resp.text();
+      throw new Error(`NapCat API error: ${resp.status} ${resp.statusText} - ${text}`);
     }
   }
 

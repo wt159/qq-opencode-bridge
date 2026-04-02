@@ -56,7 +56,11 @@ export class OpenCodeClient {
     return this.request(`/session/${sessionId}/permissions/${permissionId}`, 'POST', { response, remember });
   }
 
-  async getProviders(): Promise<{ providers: { id: string; name: string; models: { id: string }[] }[]; default: Record<string, string> }> {
+  async listSessions(): Promise<{ id: string; directory: string }[]> {
+    return this.request('/session');
+  }
+
+  async getProviders(): Promise<{ providers: { id: string; name: string; models: Record<string, { id: string; name: string }> | { id: string; name: string }[] }; default: Record<string, string> }> {
     return this.request('/config/providers');
   }
 
@@ -71,5 +75,53 @@ export class OpenCodeClient {
     } catch {
       return false;
     }
+  }
+
+  subscribeEvents(sessionId: string): AsyncIterableIterator<{ type: string; data?: unknown }> & { controller: AbortController } {
+    const controller = new AbortController();
+    const url = `${this.baseUrl}/event`;
+
+    const headers = this.getHeaders();
+
+    async function* eventStream() {
+      const resp = await fetch(url, { headers, signal: controller.signal });
+      const reader = resp.body?.getReader();
+      if (!reader) return;
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              const eventType = line.slice(7).trim();
+              // Read next line for data
+              const dataLine = lines.shift();
+              if (dataLine?.startsWith('data: ')) {
+                try {
+                  const data = JSON.parse(dataLine.slice(6));
+                  if (data.sessionId === sessionId || !data.sessionId) {
+                    yield { type: eventType, data };
+                  }
+                } catch { /* skip invalid JSON */ }
+              }
+            }
+          }
+        }
+      } finally {
+        reader.releaseLock();
+      }
+    }
+
+    const iter = eventStream();
+    return Object.assign(iter, { controller });
   }
 }
