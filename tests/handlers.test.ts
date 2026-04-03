@@ -59,6 +59,135 @@ describe('BridgeHandlers unbind', () => {
     handlers = new BridgeHandlers(config, sessions, processes, napcat);
   });
 
+  it('returns compact commands list without descriptions', async () => {
+    // Mock OpenCode GET /command to return two commands
+    const server = createServer((req, res) => {
+      if (req.method === 'GET' && req.url === '/command') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify([{ name: 'init' }, { name: 'review' }]));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    // Bind a test QQ to a project running on a dynamically assigned port (OpenCode mock server)
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const address = server.address();
+    if (address === null || typeof address === 'string') throw new Error('failed to start mock opencode server');
+    const port = address.port;
+
+    sessions.bindProject('123', '/home/wtp/workspace/opencode-napcatqq/commands-test', port, 'ses_commands');
+
+    // Trigger the handler
+    await handlers.handleCommands('123', false);
+
+    expect(napcat.messages.at(-1)?.message).toEqual([
+      {
+        type: 'text',
+        data: { text: '可用命令（2 个）:\n- /oc init\n- /oc review' },
+      },
+    ]);
+
+    server.close();
+  });
+
+  it('splits long commands list into multiple messages on line boundaries', async () => {
+    const server = createServer((req, res) => {
+      if (req.method === 'GET' && req.url === '/command') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        const cmds = Array.from({ length: 210 }, (_v, i) => ({
+          name: `cmd-${(i + 1).toString().padStart(3, '0')}`,
+        }));
+        res.end(JSON.stringify(cmds));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const address = server.address();
+    if (address === null || typeof address === 'string') throw new Error('failed to start mock opencode server');
+    const port = address.port;
+
+    sessions.bindProject('123', '/home/wtp/workspace/opencode-napcatqq/commands-test-long', port, 'ses_commands_long');
+
+    
+    await handlers.handleCommands('123', false);
+
+    
+    expect(napcat.messages.length).toBeGreaterThan(1);
+
+    
+    napcat.messages.forEach((m) => {
+      if (Array.isArray(m.message)) {
+        const first = (m.message[0] as { type: string; data: { text: string } } | undefined);
+        const text = first?.data?.text;
+        if (typeof text === 'string') {
+          const firstLine = text.split(/\n/)[0];
+          expect(firstLine.startsWith('可用命令（') || firstLine.startsWith('可用命令（第')).toBeTruthy();
+        }
+      } else if (typeof m.message === 'string') {
+        const text = m.message;
+        const firstLine = text.split(/\n/)[0];
+        expect(firstLine.startsWith('可用命令（') || firstLine.startsWith('可用命令（第')).toBeTruthy();
+      }
+    });
+
+    
+    napcat.messages.forEach((m) => {
+      if (Array.isArray(m.message)) {
+        const first = (m.message[0] as { type: string; data: { text: string } } | undefined);
+        const text = first?.data?.text;
+        if (typeof text === 'string') {
+          text.split(/\n/).forEach((ln) => {
+            if (ln.trim().startsWith('- /oc')) {
+              expect(ln).toMatch(/- \/oc [^\s]+/);
+            }
+          });
+        }
+      } else if (typeof m.message === 'string') {
+        const text = m.message;
+        text.split(/\n/).forEach((ln) => {
+          if (ln.trim().startsWith('- /oc')) {
+            expect(ln).toMatch(/- \/oc [^\s]+/);
+          }
+        });
+      }
+    });
+
+    server.close();
+  });
+
+  it('returns empty command message when OpenCode exposes none', async () => {
+    // Mock OpenCode GET /command to return empty array
+    const server = createServer((req, res) => {
+      if (req.method === 'GET' && req.url === '/command') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify([]));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    server.listen(3003, '127.0.0.1');
+    await once(server, 'listening');
+
+    sessions.bindProject('123', '/home/wtp/workspace/opencode-napcatqq/commands-test', 3003, 'ses_commands_none');
+
+    await handlers.handleCommands('123', false);
+
+    expect(napcat.messages.at(-1)?.message).toEqual([
+      { type: 'text', data: { text: '当前实例没有可用命令' } },
+    ]);
+
+    server.close();
+  });
+
   it('stops project when the last QQ unbinds', async () => {
     sessions.bindProject('123', '/home/wtp/workspace/cosmos', 3002, 'ses_1');
     processes.addInstance('/home/wtp/workspace/cosmos', 3002, 1234);

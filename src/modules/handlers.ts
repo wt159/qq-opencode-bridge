@@ -396,14 +396,45 @@ export class BridgeHandlers {
     return this.reply(qq, `已切换为: ${args.trim()}`, isGroup, groupId);
   }
 
+  private chunkLines(lines: string[], maxChars: number = 2900): string[][] {
+    const chunks: string[][] = [];
+    let current: string[] = [];
+    let currentLen = 0;
+    for (const line of lines) {
+      const lineLen = line.length;
+      const extra = current.length > 0 ? 1 + lineLen : lineLen;
+      if (currentLen + extra <= maxChars) {
+        current.push(line);
+        currentLen += extra;
+      } else {
+        if (current.length) chunks.push(current);
+        current = [line];
+        currentLen = lineLen;
+      }
+    }
+    if (current.length) chunks.push(current);
+    return chunks;
+  }
+
   async handleCommands(qq: string, isGroup: boolean, groupId?: number): Promise<void> {
     const client = this.getClient(qq);
     const cmds = await client.listCommands();
-    const lines = ['可用命令:'];
-    for (const c of cmds) {
-      lines.push(`- /oc ${c.name}${c.description ? ` — ${c.description}` : ''}`);
+    if (!cmds || cmds.length === 0) {
+      return this.reply(qq, '当前实例没有可用命令', isGroup, groupId);
     }
-    return this.reply(qq, lines.join('\n'), isGroup, groupId);
+
+    const names = cmds.map(c => c.name);
+    const bodyLines = names.map(n => `- /oc ${n}`);
+    const chunks = this.chunkLines(bodyLines, 2900);
+
+    const totalChunks = chunks.length;
+    for (let i = 0; i < totalChunks; i++) {
+      const header = i === 0
+        ? `可用命令（${names.length} 个）:`
+        : `可用命令（第${i + 1}/${totalChunks} 段，共${totalChunks}个）:`;
+      const text = header + (chunks[i].length ? '\n' + chunks[i].join('\n') : '');
+      await this.reply(qq, text, isGroup, groupId);
+    }
   }
 
   async handleOpenCodeCmd(qq: string, command: string, args: string, isGroup: boolean, groupId?: number): Promise<void> {

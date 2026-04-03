@@ -7,6 +7,11 @@ describe('parseCommand', () => {
     expect(cmd).toEqual({ type: 'bridge', command: 'bind', args: '/workspace/proj' });
   });
 
+  it('parses commands bridge command', () => {
+    const cmd = parseCommand('/commands');
+    expect(cmd).toEqual({ type: 'bridge', command: 'commands', args: '' });
+  });
+
   it('parses project switch command', () => {
     const cmd = parseCommand('/switch cosmos');
     expect(cmd).toEqual({ type: 'bridge', command: 'switch', args: 'cosmos' });
