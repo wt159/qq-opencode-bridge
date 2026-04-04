@@ -10,6 +10,7 @@ export interface Config {
     httpUrl: string;
     token?: string;
     botQQ: string;
+    notifyQQ?: string;
   };
   opencode: {
     binaryPath: string;
