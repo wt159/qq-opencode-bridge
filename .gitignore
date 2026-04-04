@@ -5,3 +5,7 @@ node_modules/
 config.json
 .pids/
 logs/
+
+# OpenCode workspace files
+.sisyphus/
+docs/superpowers/
