@@ -12,15 +12,16 @@ export class NapCatService {
     this.config = config;
   }
 
-  start(handler: MessageHandler): Promise<void> {
+  start(handler: MessageHandler, onConnect?: () => Promise<void>): Promise<void> {
     return new Promise((resolve) => {
       this.wss = new WebSocketServer({ port: this.parsePort() }, () => {
         info(`NapCat WS server listening on port ${this.parsePort()}`);
         resolve();
       });
 
-      this.wss.on('connection', (ws, req) => {
+      this.wss.on('connection', async (ws, req) => {
         info(`NapCat connected from ${req.socket.remoteAddress}`);
+        if (onConnect) await onConnect();
 
         ws.on('message', async (data) => {
           try {
