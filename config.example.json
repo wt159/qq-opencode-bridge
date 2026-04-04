@@ -1,0 +1,31 @@
+{
+  "whitelist": ["123456789"],
+  "workspaceRoot": "/home/user/workspace",
+  "napcat": {
+    "wsUrl": "ws://localhost:3001",
+    "httpUrl": "http://localhost:3000",
+    "token": "your-napcat-token",
+    "botQQ": "1000000000",
+    "notifyQQ": "123456789"
+  },
+  "opencode": {
+    "binaryPath": "/home/user/.opencode/bin/opencode",
+    "portRange": [3002, 3999],
+    "commandTimeout": 300000
+  },
+  "concurrency": {
+    "allowMultiQQPerProject": true,
+    "rejectWhenBusy": true,
+    "abortOwnOnly": true
+  },
+  "log": {
+    "level": "INFO",
+    "file": "./logs/bridge.log"
+  },
+  "permissions": {
+    "autoApprovePatterns": [
+      { "pattern": "read:*", "response": "always" }
+    ],
+    "defaultAction": "ask"
+  }
+}

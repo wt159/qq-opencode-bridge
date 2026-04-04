@@ -424,7 +424,22 @@ configure_websocket() {
     done
     
     if [ "$configured" = false ]; then
-        log_warn "未找到 onebot11 配置文件，跳过 WebSocket 配置"
+        log_info "未找到 onebot11 配置文件，自动创建..."
+        local onebot11_file="${NAPCAT_CONFIG_DIR}/onebot11.json"
+        mkdir -p "$NAPCAT_CONFIG_DIR"
+        cat > "$onebot11_file" <<EOF
+{
+  "http": {
+    "enable": true,
+    "host": "127.0.0.1",
+    "port": ${HTTP_PORT},
+    "secret": "${NAPCAT_TOKEN}"
+  },
+  "ws_reverse_url": ["ws://localhost:${WS_PORT}"]
+}
+EOF
+        log_info "onebot11 配置已创建: ${onebot11_file}"
+        log_info "反向 WS: ws://localhost:${WS_PORT} | HTTP: ${HTTP_PORT}"
     fi
     echo ""
 }
