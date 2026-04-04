@@ -7,7 +7,7 @@ import { ProcessManager } from './process.js';
 import { OpenCodeClient } from '../services/opencode.js';
 import { NapCatService } from '../services/napcat.js';
 import { validateProjectPath } from './whitelist.js';
-import { info } from '../utils/logger.js';
+import { debug, info, warn } from '../utils/logger.js';
 import { PermissionRules } from './permission-rules.js';
 import { EventProcessor } from './event-processor.js';
 
@@ -272,6 +272,12 @@ export class BridgeHandlers {
     if (s.state !== 'idle') return this.reply(qq, '当前有命令正在执行，请稍后或使用 /abort 中断', isGroup, groupId);
 
     s.state = 'running';
+    debug('handleRun start', {
+      qq,
+      sessionId: s.sessionId,
+      projectPort: s.projectPort,
+      textLength: args.length,
+    });
     await this.reply(qq, '正在执行...', isGroup, groupId);
 
     try {
@@ -284,33 +290,18 @@ export class BridgeHandlers {
       const timeoutMs = Math.max(this.config.opencode.commandTimeout, 30 * 60 * 1000);
       const timeout = setTimeout(() => {
         if (!responseReady) {
+          warn('handleRun timeout', {
+            qq,
+            sessionId: s.sessionId,
+            state: s.state,
+            timeoutMs,
+          });
           events.controller.abort();
           s.state = 'idle';
           this.activeProcessors.delete(qq);
           this.reply(qq, '命令执行超时，请稍后重试', isGroup, groupId);
         }
       }, timeoutMs);
-
-      const sendWithModel = async (currentModel: { providerID: string; modelID: string } | undefined) => {
-        await client.sendMessage(s.sessionId!, args, currentModel, events.controller.signal);
-      };
-
-      try {
-        await sendWithModel(model);
-      } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        if (message.includes('Model not found')) {
-          const fallbackModel = await this.resolveDefaultRunModel(s.projectPort);
-          if (fallbackModel && (!model || model.providerID !== fallbackModel.providerID || model.modelID !== fallbackModel.modelID)) {
-            s.model = `${fallbackModel.providerID}/${fallbackModel.modelID}`;
-            await sendWithModel(fallbackModel);
-          } else {
-            throw e;
-          }
-        } else {
-          throw e;
-        }
-      }
 
       const processor = new EventProcessor(
         this.permissionRules,
@@ -340,30 +331,88 @@ export class BridgeHandlers {
       );
       this.activeProcessors.set(qq, processor);
 
-      try {
-        let next = await eventIterator.next();
-        while (!next.done) {
-          const event = next.value;
-          await processor.handleEvent(event);
-          if (processor.currentState === 'done') {
-            responseReady = true;
-            clearTimeout(timeout);
-            break;
+      // Start SSE event loop BEFORE sendMessage.
+      // subscribeEvents() returns a lazy async generator — the internal fetch()
+      // only runs on the first .next() call. If sendMessage POST blocks before
+      // the event loop starts, SSE events (like permission.updated) are lost.
+      // By running both concurrently, the SSE connection is established while
+      // the POST is still in flight.
+      const eventLoopDone = (async () => {
+        try {
+          debug('handleRun event loop start', { qq, sessionId: s.sessionId });
+          let next = await eventIterator.next();
+          while (!next.done) {
+            const event = next.value;
+            await processor.handleEvent(event);
+            if (processor.currentState === 'done') {
+              responseReady = true;
+              clearTimeout(timeout);
+              break;
+            }
+            next = await eventIterator.next();
           }
-          next = await eventIterator.next();
+        } catch (e) {
+          const message = e instanceof Error ? e.message : String(e);
+          warn('handleRun event loop failed', {
+            qq,
+            sessionId: s.sessionId,
+            responseReady,
+            state: s.state,
+            error: message,
+          });
+          if (!responseReady) {
+            this.reply(qq, `执行失败: ${message}`, isGroup, groupId);
+          }
+        } finally {
+          events.controller.abort();
+          this.activeProcessors.delete(qq);
         }
+      })();
+
+      const sendWithModel = async (currentModel: { providerID: string; modelID: string } | undefined) => {
+        debug('handleRun sendMessage start', {
+          qq,
+          sessionId: s.sessionId,
+          providerID: currentModel?.providerID,
+          modelID: currentModel?.modelID,
+          textLength: args.length,
+        });
+        await client.sendMessage(s.sessionId!, args, currentModel, events.controller.signal);
+        debug('handleRun sendMessage success', {
+          qq,
+          sessionId: s.sessionId,
+          providerID: currentModel?.providerID,
+          modelID: currentModel?.modelID,
+        });
+      };
+
+      try {
+        await sendWithModel(model);
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
-        if (!responseReady) {
-          this.reply(qq, `执行失败: ${message}`, isGroup, groupId);
+        if (message.includes('Model not found')) {
+          const fallbackModel = await this.resolveDefaultRunModel(s.projectPort);
+          if (fallbackModel && (!model || model.providerID !== fallbackModel.providerID || model.modelID !== fallbackModel.modelID)) {
+            s.model = `${fallbackModel.providerID}/${fallbackModel.modelID}`;
+            await sendWithModel(fallbackModel);
+          } else {
+            throw e;
+          }
+        } else {
+          throw e;
         }
-      } finally {
-        events.controller.abort();
-        this.activeProcessors.delete(qq);
       }
+
+      await eventLoopDone;
 
       s.state = 'idle';
     } catch (e) {
+      warn('handleRun failed', {
+        qq,
+        sessionId: s.sessionId,
+        state: s.state,
+        error: e instanceof Error ? e.message : String(e),
+      });
       s.state = 'idle';
       this.activeProcessors.delete(qq);
       return this.reply(qq, `执行失败: ${e instanceof Error ? e.message : String(e)}`, isGroup, groupId);

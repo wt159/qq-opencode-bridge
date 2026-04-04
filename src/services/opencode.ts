@@ -1,4 +1,5 @@
 import type { PermissionData } from '../types.js';
+import { debug, warn } from '../utils/logger.js';
 
 export type OpenCodeEvent = {
   type: string;
@@ -30,6 +31,7 @@ export class OpenCodeClient {
 
   private async request<T>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal): Promise<T> {
     const url = `${this.baseUrl}${path}`;
+    const startedAt = Date.now();
     const opts: RequestInit = {
       method,
       headers: this.getHeaders(),
@@ -38,18 +40,54 @@ export class OpenCodeClient {
     if (body) {
       opts.body = JSON.stringify(body);
     }
-    const resp = await fetch(url, opts);
-    if (!resp.ok) {
-      const text = await resp.text();
-      throw new Error(`OpenCode API error: ${resp.status} ${resp.statusText} for ${method} ${path}. Body: ${text}`);
-    }
-    if (resp.status === 204) return undefined as T;
-    const text = await resp.text();
-    if (!text) return undefined as T;
+    debug('OpenCode request start', { method, path, hasBody: body !== undefined });
     try {
-      return JSON.parse(text) as T;
+      const resp = await fetch(url, opts);
+      if (!resp.ok) {
+        const text = await resp.text();
+        warn('OpenCode request failed', {
+          method,
+          path,
+          status: resp.status,
+          statusText: resp.statusText,
+          durationMs: Date.now() - startedAt,
+        });
+        throw new Error(`OpenCode API error: ${resp.status} ${resp.statusText} for ${method} ${path}. Body: ${text}`);
+      }
+      if (resp.status === 204) {
+        debug('OpenCode request success', { method, path, status: resp.status, durationMs: Date.now() - startedAt });
+        return undefined as T;
+      }
+      const text = await resp.text();
+      debug('OpenCode request success', {
+        method,
+        path,
+        status: resp.status,
+        durationMs: Date.now() - startedAt,
+        bodyLength: text.length,
+      });
+      if (!text) return undefined as T;
+      try {
+        return JSON.parse(text) as T;
+      } catch (e) {
+        warn('OpenCode request JSON parse failed', {
+          method,
+          path,
+          durationMs: Date.now() - startedAt,
+          error: e instanceof Error ? e.message : String(e),
+          bodyLength: text.length,
+        });
+        throw new Error(`Failed to parse JSON response: ${text}. Error: ${e}`);
+      }
     } catch (e) {
-      throw new Error(`Failed to parse JSON response: ${text}. Error: ${e}`);
+      warn('OpenCode request failed', {
+        method,
+        path,
+        durationMs: Date.now() - startedAt,
+        aborted: signal?.aborted ?? false,
+        error: e instanceof Error ? e.message : String(e),
+      });
+      throw e;
     }
   }
 
@@ -110,9 +148,19 @@ export class OpenCodeClient {
     const headers = this.getHeaders();
 
     async function* eventStream() {
+      const startedAt = Date.now();
+      debug('OpenCode SSE connect start', { sessionId });
       const resp = await fetch(url, { headers, signal: controller.signal });
+      debug('OpenCode SSE connected', {
+        sessionId,
+        status: resp.status,
+        durationMs: Date.now() - startedAt,
+      });
       const reader = resp.body?.getReader();
-      if (!reader) return;
+      if (!reader) {
+        warn('OpenCode SSE missing reader', { sessionId });
+        return;
+      }
 
       const decoder = new TextDecoder();
       let buffer = '';
@@ -144,6 +192,7 @@ export class OpenCodeClient {
           }
         }
       } finally {
+        debug('OpenCode SSE closed', { sessionId, durationMs: Date.now() - startedAt, aborted: controller.signal.aborted });
         reader.releaseLock();
       }
     }

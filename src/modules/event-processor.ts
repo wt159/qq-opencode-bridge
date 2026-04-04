@@ -2,7 +2,7 @@ import type { PermissionData } from '../types.js';
 import type { OpenCodeClient } from '../services/opencode.js';
 import type { OpenCodeEvent } from '../services/opencode.js';
 import type { PermissionRules } from './permission-rules.js';
-import { info } from '../utils/logger.js';
+import { debug, info } from '../utils/logger.js';
 
 export type EventProcessorState = 'streaming' | 'waiting_permission' | 'done';
 
@@ -44,6 +44,11 @@ export class EventProcessor {
         } | undefined;
         const perm = props?.permission;
         if (!perm) break;
+        debug('Permission request received', {
+          sessionId: this.sessionId,
+          permissionId: perm.id,
+          permissionType: perm.type,
+        });
 
         const decision = this.rules.evaluate(perm);
         if (decision) {
