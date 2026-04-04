@@ -21,7 +21,15 @@ export class NapCatService {
 
       this.wss.on('connection', async (ws, req) => {
         info(`NapCat connected from ${req.socket.remoteAddress}`);
-        if (onConnect) await onConnect();
+        if (onConnect) {
+          info('onConnect callback fired, invoking...');
+          try {
+            await onConnect();
+            info('onConnect callback completed successfully');
+          } catch (e) {
+            error('onConnect callback failed', e);
+          }
+        }
 
         ws.on('message', async (data) => {
           try {
@@ -59,13 +67,22 @@ export class NapCatService {
       headers['Authorization'] = `Bearer ${this.config.napcat.token}`;
     }
 
-    debug('NapCat API call', action, params);
+    info(`NapCat API call: ${action}`, JSON.stringify(params));
 
-    const resp = await fetch(url, { method: 'POST', headers, body: JSON.stringify(params) });
-    if (!resp.ok) {
-      const text = await resp.text();
-      throw new Error(`NapCat API error: ${resp.status} ${resp.statusText} - ${text}`);
+    let resp: Response;
+    try {
+      resp = await fetch(url, { method: 'POST', headers, body: JSON.stringify(params) });
+    } catch (e) {
+      error(`NapCat API network error: ${action} ${url}`, e);
+      throw e;
     }
+
+    const body = await resp.text();
+    if (!resp.ok) {
+      error(`NapCat API error: ${resp.status} ${resp.statusText}`, body);
+      throw new Error(`NapCat API error: ${resp.status} ${resp.statusText} - ${body}`);
+    }
+    info(`NapCat API response: ${action} ${resp.status}`, body);
   }
 
   stop(): void {

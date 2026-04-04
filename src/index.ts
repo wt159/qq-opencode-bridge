@@ -126,14 +126,19 @@ async function main() {
       }
     },
     async () => {
+      info('NapCat onConnect triggered');
       if (config.napcat.notifyQQ) {
+        info(`Sending startup notification to QQ: ${config.napcat.notifyQQ}`);
         try {
           await napcat.sendPrivateMsg(config.napcat.notifyQQ, [
             { type: 'text', data: { text: `✅ QQ-OpenCode Bridge 已启动\n📁 工作目录: ${config.workspaceRoot}\n🔗 NapCat 连接就绪` } }
           ]);
+          info('Startup notification sent successfully');
         } catch (e) {
           error('Failed to send startup notification', e);
         }
+      } else {
+        info('notifyQQ not configured, skipping startup notification');
       }
     }
   );
