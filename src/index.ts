@@ -21,80 +21,81 @@ async function main() {
 
   const handlers = new BridgeHandlers(config, sessions, processes, napcat);
 
-  await napcat.start(async (event) => {
-    const qq = String(event.user_id);
-    if (!isWhitelisted(qq, config.whitelist)) return;
+  await napcat.start(
+    async (event) => {
+      const qq = String(event.user_id);
+      if (!isWhitelisted(qq, config.whitelist)) return;
 
-    const normalized = normalizeMessage(
-      event.message_type,
-      event.message,
-      config.napcat.botQQ,
-    );
-    if (!normalized) return;
+      const normalized = normalizeMessage(
+        event.message_type,
+        event.message,
+        config.napcat.botQQ,
+      );
+      if (!normalized) return;
 
-    const parsed = parseCommand(normalized);
-    if (!parsed) {
-      await handleFreeText(qq, normalized, sessions, napcat, config);
-      return;
-    }
+      const parsed = parseCommand(normalized);
+      if (!parsed) {
+        await handleFreeText(qq, normalized, sessions, napcat, config);
+        return;
+      }
 
-    const isGroup = event.message_type === 'group';
-    const groupId = event.group_id;
+      const isGroup = event.message_type === 'group';
+      const groupId = event.group_id;
 
-    try {
-      switch (parsed.command) {
-        case 'bind': await handlers.handleBind(qq, parsed.args, isGroup, groupId); break;
-        case 'unbind': await handlers.handleUnbind(qq, isGroup, groupId); break;
-        case 'switch': await handlers.handleSwitch(qq, parsed.args, isGroup, groupId); break;
-        case 'status': await handlers.handleStatus(qq, isGroup, groupId); break;
-        case 'list': await handlers.handleList(qq, isGroup, groupId); break;
-        case 'run': await handlers.handleRun(qq, parsed.args, isGroup, groupId); break;
-        case 'abort': await handlers.handleAbort(qq, isGroup, groupId); break;
-        case 'modes': await handlers.handleModes(qq, parsed.args, isGroup, groupId); break;
-        case 'commands': await handlers.handleCommands(qq, isGroup, groupId); break;
-        case 'approve': await handlers.handlePermission(qq, true, isGroup, groupId); break;
-        case 'reject': await handlers.handlePermission(qq, false, isGroup, groupId); break;
-        case 'stop': await handlers.handleStop(qq, parsed.args, isGroup, groupId); break;
-        case 'stopall': await handlers.handleStopAll(qq, isGroup, groupId); break;
-        case 'ls': {
-          const path = parsed.args || config.workspaceRoot;
-          const resolved = resolve(config.workspaceRoot, path);
-          const projects = listProjects(resolved);
-          const msg = projects.length > 0
-            ? `项目列表:\n${projects.map((p, i) => `${i + 1}. ${p}`).join('\n')}`
-            : '没有找到项目';
-          await napcat.sendPrivateMsg(qq, [{ type: 'text', data: { text: msg } }]);
-          break;
-        }
-        case 'new': {
-          const parts = parsed.args.trim().split(/\s+/);
-          if (parts.length === 1) {
-            const path = createProject(config.workspaceRoot, parts[0]);
-            await napcat.sendPrivateMsg(qq, [{ type: 'text', data: { text: `✅ 项目已创建: ${path}` } }]);
-          } else if (parts.length >= 2) {
-            const path = cloneProject(config.workspaceRoot, parts[0], parts.slice(1).join(' '));
-            await napcat.sendPrivateMsg(qq, [{ type: 'text', data: { text: `✅ 项目已克隆: ${path}` } }]);
-          } else {
-            await napcat.sendPrivateMsg(qq, [{ type: 'text', data: { text: '用法: /new <name> 或 /new <url> <name>' } }]);
+      try {
+        switch (parsed.command) {
+          case 'bind': await handlers.handleBind(qq, parsed.args, isGroup, groupId); break;
+          case 'unbind': await handlers.handleUnbind(qq, isGroup, groupId); break;
+          case 'switch': await handlers.handleSwitch(qq, parsed.args, isGroup, groupId); break;
+          case 'status': await handlers.handleStatus(qq, isGroup, groupId); break;
+          case 'list': await handlers.handleList(qq, isGroup, groupId); break;
+          case 'run': await handlers.handleRun(qq, parsed.args, isGroup, groupId); break;
+          case 'abort': await handlers.handleAbort(qq, isGroup, groupId); break;
+          case 'modes': await handlers.handleModes(qq, parsed.args, isGroup, groupId); break;
+          case 'commands': await handlers.handleCommands(qq, isGroup, groupId); break;
+          case 'approve': await handlers.handlePermission(qq, true, isGroup, groupId); break;
+          case 'reject': await handlers.handlePermission(qq, false, isGroup, groupId); break;
+          case 'stop': await handlers.handleStop(qq, parsed.args, isGroup, groupId); break;
+          case 'stopall': await handlers.handleStopAll(qq, isGroup, groupId); break;
+          case 'ls': {
+            const path = parsed.args || config.workspaceRoot;
+            const resolved = resolve(config.workspaceRoot, path);
+            const projects = listProjects(resolved);
+            const msg = projects.length > 0
+              ? `项目列表:\n${projects.map((p, i) => `${i + 1}. ${p}`).join('\n')}`
+              : '没有找到项目';
+            await napcat.sendPrivateMsg(qq, [{ type: 'text', data: { text: msg } }]);
+            break;
           }
-          break;
-        }
-        case 'mkdir': {
-          const s = sessions.getOrCreate(qq);
-          const base = s.projectPath || config.workspaceRoot;
-          const path = createDirectory(base, parsed.args);
-          await napcat.sendPrivateMsg(qq, [{ type: 'text', data: { text: `✅ 目录已创建: ${path}` } }]);
-          break;
-        }
-        case 'tree': {
-          const s = sessions.getOrCreate(qq);
-          const base = parsed.args ? resolve(config.workspaceRoot, parsed.args) : (s.projectPath || config.workspaceRoot);
-          const tree = getDirectoryTree(base);
-          await napcat.sendPrivateMsg(qq, [{ type: 'text', data: { text: tree } }]);
-          break;
-        }
-        case 'help': {
-          const help = `可用命令:
+          case 'new': {
+            const parts = parsed.args.trim().split(/\s+/);
+            if (parts.length === 1) {
+              const path = createProject(config.workspaceRoot, parts[0]);
+              await napcat.sendPrivateMsg(qq, [{ type: 'text', data: { text: `✅ 项目已创建: ${path}` } }]);
+            } else if (parts.length >= 2) {
+              const path = cloneProject(config.workspaceRoot, parts[0], parts.slice(1).join(' '));
+              await napcat.sendPrivateMsg(qq, [{ type: 'text', data: { text: `✅ 项目已克隆: ${path}` } }]);
+            } else {
+              await napcat.sendPrivateMsg(qq, [{ type: 'text', data: { text: '用法: /new <name> 或 /new <url> <name>' } }]);
+            }
+            break;
+          }
+          case 'mkdir': {
+            const s = sessions.getOrCreate(qq);
+            const base = s.projectPath || config.workspaceRoot;
+            const path = createDirectory(base, parsed.args);
+            await napcat.sendPrivateMsg(qq, [{ type: 'text', data: { text: `✅ 目录已创建: ${path}` } }]);
+            break;
+          }
+          case 'tree': {
+            const s = sessions.getOrCreate(qq);
+            const base = parsed.args ? resolve(config.workspaceRoot, parsed.args) : (s.projectPath || config.workspaceRoot);
+            const tree = getDirectoryTree(base);
+            await napcat.sendPrivateMsg(qq, [{ type: 'text', data: { text: tree } }]);
+            break;
+          }
+          case 'help': {
+            const help = `可用命令:
 /bind <path> - 绑定项目
 /unbind <path> - 解除绑定并关闭项目
 /switch <path> - 切换项目
@@ -113,17 +114,29 @@ async function main() {
 /oc <cmd> - 执行 OpenCode 命令
 /stop <path> - 关闭项目
 /stopall - 关闭所有项目`;
-          await napcat.sendPrivateMsg(qq, [{ type: 'text', data: { text: help } }]);
-          break;
+            await napcat.sendPrivateMsg(qq, [{ type: 'text', data: { text: help } }]);
+            break;
+          }
+          default:
+            await napcat.sendPrivateMsg(qq, [{ type: 'text', data: { text: '未知命令，请输入 /help 查看帮助' } }]);
         }
-        default:
-          await napcat.sendPrivateMsg(qq, [{ type: 'text', data: { text: '未知命令，请输入 /help 查看帮助' } }]);
+      } catch (e) {
+        error('Handler error', e);
+        await napcat.sendPrivateMsg(qq, [{ type: 'text', data: { text: `内部错误: ${e instanceof Error ? e.message : String(e)}` } }]);
       }
-    } catch (e) {
-      error('Handler error', e);
-      await napcat.sendPrivateMsg(qq, [{ type: 'text', data: { text: `内部错误: ${e instanceof Error ? e.message : String(e)}` } }]);
+    },
+    async () => {
+      if (config.napcat.notifyQQ) {
+        try {
+          await napcat.sendPrivateMsg(config.napcat.notifyQQ, [
+            { type: 'text', data: { text: `✅ QQ-OpenCode Bridge 已启动\n📁 工作目录: ${config.workspaceRoot}\n🔗 NapCat 连接就绪` } }
+          ]);
+        } catch (e) {
+          error('Failed to send startup notification', e);
+        }
+      }
     }
-  });
+  );
 
   info('QQ-OpenCode Bridge started');
 
