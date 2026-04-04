@@ -4,6 +4,45 @@
 
 Bridge 桥接 QQ（经由 [NapCatQQ](https://napneko.github.io/)）与 OpenCode Server，让你可以在 QQ 私聊或群聊中直接发送自然语言指令来编写、修改和管理代码。
 
+> ⚠️ **特别说明**：本人并不会 TypeScript 语言开发，此项目完全由 AI 开发完成。
+>
+> **AI 编程工具链**：本项目基于 [OpenCode](https://opencode.ai) AI 编程代理构建，配合其生态系统中的 Skills（智能体技能插件）、Plugins（扩展插件）、MCP Servers（模型上下文协议工具）及内置 Tools（代码操作工具）完成全部开发工作。
+>
+> <details>
+> <summary><b>📦 已安装的 OpenCode 插件与 Skills（点击展开）</b></summary>
+>
+> **Plugins（插件）：**
+>
+> | 插件 | 版本 | 说明 |
+> |------|------|------|
+> | [superpowers](https://github.com/obra/superpowers) | v5.0.6 | 提供 14 个 AI Agent 技能（见下方） |
+> | oh-my-openagent | latest | 自定义代理插件 |
+>
+> **Skills（技能，来自 superpowers）：**
+>
+> | 技能 | 用途 |
+> |------|------|
+> | `brainstorming` | 创意构思与需求分析，实现前探索方案 |
+> | `writing-plans` | 编写多步骤实施计划 |
+> | `executing-plans` | 在独立会话中执行计划 |
+> | `test-driven-development` | TDD 工作流：先写测试再实现 |
+> | `systematic-debugging` | 系统化调试：根因分析 → 修复 → 验证 |
+> | `subagent-driven-development` | 多子代理并行开发 |
+> | `dispatching-parallel-agents` | 分发独立任务到并行代理 |
+> | `requesting-code-review` | 提交前代码审查 |
+> | `receiving-code-review` | 接收并处理审查反馈 |
+> | `verification-before-completion` | 完成前验证：测试/构建/类型检查 |
+> | `finishing-a-development-branch` | 开发分支收尾：合并/PR/清理 |
+> | `using-superpowers` | 超能力使用指南（启动时加载） |
+> | `using-git-worktrees` | Git Worktree 隔离开发 |
+> | `writing-skills` | 创建和编辑 Skills 本身 |
+>
+> **其他依赖：**
+> - `@code-yeongyu/comment-checker` — 代码注释检查工具
+> - `@opencode-ai/plugin` — OpenCode 官方插件基础库
+>
+> </details>
+
 ## 功能
 
 - **自然语言编程** — `/run 帮我重构这个函数`，OpenCode 执行后结果回传 QQ
