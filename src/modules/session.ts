@@ -48,6 +48,18 @@ export class SessionManager {
     s.model = model;
   }
 
+  setPendingPermission(qq: string, permissionId: string): void {
+    const s = this.getOrCreate(qq);
+    s.state = 'permission_pending';
+    s.pendingPermissionId = permissionId;
+  }
+
+  clearPendingPermission(qq: string, nextState: SessionState): void {
+    const s = this.getOrCreate(qq);
+    s.pendingPermissionId = null;
+    s.state = nextState;
+  }
+
   setState(qq: string, state: SessionState): void {
     const s = this.getOrCreate(qq);
     s.state = state;

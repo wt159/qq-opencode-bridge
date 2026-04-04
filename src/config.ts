@@ -6,6 +6,12 @@ export function loadConfig(configPath: string): Config {
   const absolute = resolve(configPath);
   const raw = readFileSync(absolute, 'utf-8');
   const config = JSON.parse(raw) as Config;
+
+  config.permissions = {
+    autoApprovePatterns: config.permissions?.autoApprovePatterns ?? [],
+    defaultAction: config.permissions?.defaultAction ?? 'ask',
+  };
+
   validateConfig(config);
   return config;
 }

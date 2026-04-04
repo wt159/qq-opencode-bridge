@@ -1,3 +1,5 @@
+import type { PermissionData } from '../types.js';
+
 export type OpenCodeEvent = {
   type: string;
   properties?: {
@@ -5,6 +7,7 @@ export type OpenCodeEvent = {
     status?: { type: string };
     part?: { type: string; text?: string };
     error?: { name?: string; data?: { message?: string } };
+    permission?: PermissionData;
   };
 };
 

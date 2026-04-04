@@ -7,6 +7,7 @@ import { NapCatService } from './services/napcat.js';
 import { parseCommand, normalizeMessage } from './modules/command.js';
 import { isWhitelisted } from './modules/whitelist.js';
 import { createProject, cloneProject, createDirectory, getDirectoryTree, listProjects } from './modules/filesystem.js';
+import { handleFreeText } from './modules/message-router.js';
 import { resolve } from 'path';
 
 async function main() {
@@ -33,7 +34,7 @@ async function main() {
 
     const parsed = parseCommand(normalized);
     if (!parsed) {
-      await napcat.sendPrivateMsg(qq, [{ type: 'text', data: { text: '未知命令，请输入 /help 查看帮助' } }]);
+      await handleFreeText(qq, normalized, sessions, napcat, config);
       return;
     }
 

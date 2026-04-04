@@ -22,12 +22,34 @@ export interface Config {
     level: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
     file?: string;
   };
+  permissions?: {
+    autoApprovePatterns: PermissionRule[];
+    defaultAction: 'ask' | 'allow' | 'reject';
+  };
 }
 
 export interface ConcurrencyRule {
   allowMultiQQPerProject: boolean;
   rejectWhenBusy: boolean;
   abortOwnOnly: boolean;
+}
+
+// ── Permission Rules ──────────────────────────────────────────
+
+export interface PermissionData {
+  id: string;
+  messageID: string;
+  sessionID: string;
+  title: string;
+  type: string;
+  metadata: Record<string, unknown>;
+  callID?: string;
+  pattern?: string | string[];
+}
+
+export interface PermissionRule {
+  pattern: string;
+  response: 'once' | 'always' | 'reject';
 }
 
 // ── Runtime State ──────────────────────────────────────────────

@@ -1,6 +1,6 @@
 import { existsSync } from 'fs';
 import { resolve } from 'path';
-import type { Config } from '../types.js';
+import type { Config, PermissionData } from '../types.js';
 import { BridgeError } from '../types.js';
 import { SessionManager } from './session.js';
 import { ProcessManager } from './process.js';
@@ -8,6 +8,8 @@ import { OpenCodeClient } from '../services/opencode.js';
 import { NapCatService } from '../services/napcat.js';
 import { validateProjectPath } from './whitelist.js';
 import { info } from '../utils/logger.js';
+import { PermissionRules } from './permission-rules.js';
+import { EventProcessor } from './event-processor.js';
 
 type OpenCodeProviderModel = {
   id: string;
@@ -26,6 +28,16 @@ export class BridgeHandlers {
     private processes: ProcessManager,
     private napcat: NapCatService,
   ) {}
+
+  private activeProcessors = new Map<string, EventProcessor>();
+
+  private get permissionRules(): PermissionRules {
+    const perms = this.config.permissions;
+    return new PermissionRules(
+      perms?.autoApprovePatterns ?? [],
+      perms?.defaultAction ?? 'ask',
+    );
+  }
 
   private getClient(qq: string): OpenCodeClient {
     const s = this.sessions.getOrCreate(qq);
@@ -256,26 +268,25 @@ export class BridgeHandlers {
   async handleRun(qq: string, args: string, isGroup: boolean, groupId?: number): Promise<void> {
     const s = this.sessions.getOrCreate(qq);
     if (!s.sessionId) return this.reply(qq, '请先使用 /bind <项目路径> 绑定项目', isGroup, groupId);
+    if (s.state === 'permission_pending') return this.reply(qq, '请先 /approve 或 /reject 当前权限请求', isGroup, groupId);
     if (s.state !== 'idle') return this.reply(qq, '当前有命令正在执行，请稍后或使用 /abort 中断', isGroup, groupId);
 
     s.state = 'running';
     await this.reply(qq, '正在执行...', isGroup, groupId);
-    
+
     try {
       const client = this.getClient(qq);
       const model = await this.resolveRunModel(qq);
       const events = client.subscribeEvents(s.sessionId!);
       const eventIterator = events[Symbol.asyncIterator]();
-      const firstEventPromise = eventIterator.next();
 
       let responseReady = false;
-      let text = '';
-      let lastError: string | null = null;
       const timeoutMs = Math.max(this.config.opencode.commandTimeout, 30 * 60 * 1000);
       const timeout = setTimeout(() => {
         if (!responseReady) {
           events.controller.abort();
           s.state = 'idle';
+          this.activeProcessors.delete(qq);
           this.reply(qq, '命令执行超时，请稍后重试', isGroup, groupId);
         }
       }, timeoutMs);
@@ -301,61 +312,82 @@ export class BridgeHandlers {
         }
       }
 
+      const processor = new EventProcessor(
+        this.permissionRules,
+        client,
+        s.sessionId!,
+        {
+          onText: () => {},
+          onPermissionRequest: (perm: PermissionData) => {
+            this.sessions.setPendingPermission(qq, perm.id);
+            this.reply(qq, `⚠️ 权限请求: ${perm.title}\n使用 /approve 或 /reject 回复`, isGroup, groupId);
+          },
+          onComplete: (text: string) => {
+            responseReady = true;
+            clearTimeout(timeout);
+            this.sessions.clearPendingPermission(qq, 'idle');
+            this.activeProcessors.delete(qq);
+            this.reply(qq, text || '(无输出)', isGroup, groupId);
+          },
+          onError: (errorMsg: string) => {
+            responseReady = true;
+            clearTimeout(timeout);
+            this.sessions.clearPendingPermission(qq, 'idle');
+            this.activeProcessors.delete(qq);
+            this.reply(qq, `执行失败: ${errorMsg}`, isGroup, groupId);
+          },
+        },
+      );
+      this.activeProcessors.set(qq, processor);
+
       try {
-        let next = await firstEventPromise;
+        let next = await eventIterator.next();
         while (!next.done) {
           const event = next.value;
-          if (event.type === 'message.part.updated') {
-            const content = this.extractEventText(event);
-            if (content) text += content;
-          }
-          if (event.type === 'session.error') {
-            const props = event.properties as { error?: { data?: { message?: string } } } | undefined;
-            lastError = props?.error?.data?.message || 'OpenCode 执行失败';
+          await processor.handleEvent(event);
+          if (processor.currentState === 'done') {
             responseReady = true;
             clearTimeout(timeout);
             break;
-          }
-          if (event.type === 'session.status') {
-            const props = event.properties as { status?: { type?: string } } | undefined;
-            if (props?.status?.type === 'idle') {
-              responseReady = true;
-              clearTimeout(timeout);
-              break;
-            }
           }
           next = await eventIterator.next();
         }
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
-        if (!lastError) lastError = message;
+        if (!responseReady) {
+          this.reply(qq, `执行失败: ${message}`, isGroup, groupId);
+        }
       } finally {
         events.controller.abort();
+        this.activeProcessors.delete(qq);
       }
 
       s.state = 'idle';
-      if (lastError) {
-        return this.reply(qq, `执行失败: ${lastError}`, isGroup, groupId);
-      }
-      return this.reply(qq, text || '(无输出)', isGroup, groupId);
     } catch (e) {
       s.state = 'idle';
+      this.activeProcessors.delete(qq);
       return this.reply(qq, `执行失败: ${e instanceof Error ? e.message : String(e)}`, isGroup, groupId);
     }
   }
 
   async handleAbort(qq: string, isGroup: boolean, groupId?: number): Promise<void> {
     const s = this.sessions.getOrCreate(qq);
-    if (s.state !== 'running') return this.reply(qq, '当前没有正在执行的命令', isGroup, groupId);
+    if (s.state !== 'running' && s.state !== 'permission_pending') {
+      return this.reply(qq, '当前没有正在执行的命令', isGroup, groupId);
+    }
 
     s.state = 'aborting';
     try {
       const client = this.getClient(qq);
       await client.abort(s.sessionId!);
       s.state = 'idle';
+      s.pendingPermissionId = null;
+      this.activeProcessors.delete(qq);
       return this.reply(qq, '已中断', isGroup, groupId);
     } catch (e) {
       s.state = 'idle';
+      s.pendingPermissionId = null;
+      this.activeProcessors.delete(qq);
       return this.reply(qq, `中断失败: ${e instanceof Error ? e.message : String(e)}`, isGroup, groupId);
     }
   }
@@ -457,10 +489,23 @@ export class BridgeHandlers {
 
   async handlePermission(qq: string, approve: boolean, isGroup: boolean, groupId?: number): Promise<void> {
     const s = this.sessions.getOrCreate(qq);
-    if (s.state !== 'permission_pending') {
+    if (s.state !== 'permission_pending' || !s.pendingPermissionId) {
       return this.reply(qq, '当前没有待确认的权限请求', isGroup, groupId);
     }
-    return this.reply(qq, approve ? '已授权' : '已拒绝', isGroup, groupId);
+
+    const processor = this.activeProcessors.get(qq);
+    if (!processor) {
+      return this.reply(qq, '没有活跃的执行会话', isGroup, groupId);
+    }
+
+    const response = approve ? 'once' : 'reject';
+    try {
+      await processor.respondToPermission(s.pendingPermissionId, response);
+      this.sessions.clearPendingPermission(qq, 'running');
+      return this.reply(qq, approve ? '✅ 已授权' : '❌ 已拒绝', isGroup, groupId);
+    } catch (e) {
+      return this.reply(qq, `授权失败: ${e instanceof Error ? e.message : String(e)}`, isGroup, groupId);
+    }
   }
 
   async handleStop(qq: string, args: string, isGroup: boolean, groupId?: number): Promise<void> {

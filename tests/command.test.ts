@@ -39,6 +39,16 @@ describe('parseCommand', () => {
     const cmd = parseCommand('/oc');
     expect(cmd).toEqual({ type: 'opencode', command: 'help', args: '' });
   });
+
+  it('parses approve command', () => {
+    const cmd = parseCommand('/approve');
+    expect(cmd).toEqual({ type: 'bridge', command: 'approve', args: '' });
+  });
+
+  it('parses reject command', () => {
+    const cmd = parseCommand('/reject');
+    expect(cmd).toEqual({ type: 'bridge', command: 'reject', args: '' });
+  });
 });
 
 describe('normalizeMessage', () => {
