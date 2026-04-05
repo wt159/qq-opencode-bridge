@@ -22,8 +22,14 @@ export function error(msg: string, ...args: unknown[]) {
   if (currentLevel <= LEVELS.ERROR) log('ERROR', msg, args);
 }
 
+function formatLocalTimestamp(date: Date): string {
+  const pad = (n: number, w = 2) => String(n).padStart(w, '0');
+  const ms = pad(date.getMilliseconds(), 3);
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${ms}`;
+}
+
 function log(level: string, msg: string, args: unknown[]) {
-  const ts = new Date().toISOString();
+  const ts = formatLocalTimestamp(new Date());
   const extra = args.length > 0 ? ' ' + args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ') : '';
   process.stdout.write(`[${ts}] [${level}] ${msg}${extra}\n`);
 }

@@ -16,6 +16,7 @@ PID_DIR="${SCRIPT_DIR}/.pids"
 BRIDGE_PID_FILE="${PID_DIR}/bridge.pid"
 LOG_DIR="${SCRIPT_DIR}/logs"
 BRIDGE_LOG="${LOG_DIR}/bridge.log"
+QQ_LOG="${LOG_DIR}/qq.log"
 MAX_LOG_SIZE=10485760  # 10MB
 
 # ─── 辅助函数 ────────────────────────────────────────────────────────────────
@@ -581,6 +582,8 @@ stop_bridge() {
 start_napcat() {
     log_step "4/4" "启动 QQ (NapCat)..."
     
+    rotate_log "${QQ_LOG}"
+    
     # 检查 QQ 是否已在运行
     if pgrep -f "qq.*no-sandbox" > /dev/null 2>&1 || pgrep -x "qq" > /dev/null 2>&1; then
         log_info "QQ 已在运行"
@@ -590,25 +593,31 @@ start_napcat() {
     
     local qq_started=false
     
+    # 记录日志起始位置，仅检测本次启动的输出
+    local log_start_line=0
+    if [ -f "${QQ_LOG}" ]; then
+        log_start_line=$(wc -l < "${QQ_LOG}")
+    fi
+    
     # 优先使用 napcat 命令
     if command -v napcat &> /dev/null; then
         log_info "使用 napcat 命令启动..."
-        nohup napcat start > /dev/null 2>&1 &
+        nohup napcat start >> "${QQ_LOG}" 2>&1 &
         qq_started=true
     # 使用 NapCat 安装目录的 QQ
     elif [ -f "$HOME/Napcat/opt/QQ/qq" ]; then
         log_info "使用 ~/Napcat/opt/QQ/qq 启动..."
-        nohup "$HOME/Napcat/opt/QQ/qq" --no-sandbox --disable-gpu --disable-dev-shm-usage > /dev/null 2>&1 &
+        nohup "$HOME/Napcat/opt/QQ/qq" --no-sandbox --disable-gpu --disable-dev-shm-usage -q "${BOT_QQ}" >> "${QQ_LOG}" 2>&1 &
         qq_started=true
     # 使用 ~/napcat 目录
     elif [ -f "$HOME/napcat/napcat.sh" ]; then
         log_info "使用 ~/napcat/napcat.sh 启动..."
-        nohup bash "$HOME/napcat/napcat.sh" > /dev/null 2>&1 &
+        nohup bash "$HOME/napcat/napcat.sh" >> "${QQ_LOG}" 2>&1 &
         qq_started=true
     # 使用 ~/.config/QQ 目录
     elif [ -f "$HOME/.config/QQ/NapCat/napcat.sh" ]; then
         log_info "使用 NapCat 目录下的启动脚本..."
-        nohup bash "$HOME/.config/QQ/NapCat/napcat.sh" > /dev/null 2>&1 &
+        nohup bash "$HOME/.config/QQ/NapCat/napcat.sh" >> "${QQ_LOG}" 2>&1 &
         qq_started=true
     fi
     
@@ -625,6 +634,32 @@ start_napcat() {
         sleep 2
         if pgrep -f "qq" > /dev/null 2>&1; then
             log_info "QQ 进程已启动"
+
+            local login_detected=false
+            for i in $(seq 1 15); do
+                sleep 1
+                local new_lines=$(tail -n +"$((log_start_line + 1))" "${QQ_LOG}" 2>/dev/null)
+                if [ -n "$new_lines" ]; then
+                    if echo "$new_lines" | grep -q "快速登录成功\|自动快速登录成功\|AdapterManager.*初始化"; then
+                        log_info "QQ 快速登录成功 (QQ: ${BOT_QQ})"
+                        login_detected=true
+                        break
+                    elif echo "$new_lines" | grep -q "二维码\|qrcode"; then
+                        log_warn "QQ 需要扫码登录"
+                        echo -e "${YELLOW}请查看日志中的二维码: tail -f ${QQ_LOG}${NC}"
+                        echo -e "${YELLOW}或访问 WebUI: http://localhost:6099/webui?token=${NAPCAT_TOKEN}${NC}"
+                        login_detected=true
+                        break
+                    elif echo "$new_lines" | grep -q "登录失败\|快速登录失败\|Login Error"; then
+                        log_error "QQ 登录失败，查看日志: tail -f ${QQ_LOG}"
+                        login_detected=true
+                        break
+                    fi
+                fi
+            done
+            if [ "$login_detected" = false ]; then
+                log_warn "QQ 登录状态未知，请检查日志: tail -f ${QQ_LOG}"
+            fi
         else
             log_warn "QQ 可能未成功启动，请检查"
         fi
@@ -729,6 +764,7 @@ main() {
             stop_bridge
             sleep 1
             start_bridge
+            start_napcat
             log_info "服务已重启"
             show_status
             ;;
