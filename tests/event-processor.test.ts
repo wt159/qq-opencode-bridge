@@ -30,6 +30,19 @@ function makePermEvent(perm: Partial<PermissionData> = {}): OpenCodeEvent {
   return { type: 'permission.updated', properties: { permission, sessionID: 'ses-1' } };
 }
 
+function makePermAskedEvent(overrides: Partial<{ id: string; sessionID: string; permission: string; patterns: string[]; metadata: Record<string, unknown>; always: string[]; tool?: { messageID: string; callID: string } }> = {}): OpenCodeEvent {
+  const props = {
+    id: 'perm-1',
+    sessionID: 'ses-1',
+    permission: 'bash',
+    patterns: ['/tmp/test'],
+    metadata: {},
+    always: [],
+    ...overrides,
+  };
+  return { type: 'permission.asked', properties: props as Record<string, unknown> };
+}
+
 describe('EventProcessor', () => {
   function createProcessor(rules?: PermissionRules) {
     const permissionRules = rules ?? new PermissionRules([], 'ask');
@@ -157,13 +170,78 @@ describe('EventProcessor', () => {
     expect(processor.currentState).toBe('streaming');
   });
 
-  it('ignores unknown event types', async () => {
-    const { processor, callbacks } = createProcessor();
-    await processor.handleEvent(makeEvent('unknown.event', { foo: 'bar' }));
-    expect(callbacks.onText).not.toHaveBeenCalled();
-    expect(callbacks.onPermissionRequest).not.toHaveBeenCalled();
-    expect(callbacks.onComplete).not.toHaveBeenCalled();
-    expect(callbacks.onError).not.toHaveBeenCalled();
-    expect(processor.currentState).toBe('streaming');
-  });
-});
+   it('ignores unknown event types', async () => {
+     const { processor, callbacks } = createProcessor();
+     await processor.handleEvent(makeEvent('unknown.event', { foo: 'bar' }));
+     expect(callbacks.onText).not.toHaveBeenCalled();
+     expect(callbacks.onPermissionRequest).not.toHaveBeenCalled();
+     expect(callbacks.onComplete).not.toHaveBeenCalled();
+     expect(callbacks.onError).not.toHaveBeenCalled();
+     expect(processor.currentState).toBe('streaming');
+   });
+
+    it('handles permission.asked event (V2) and notifies user', async () => {
+      const { processor, callbacks } = createProcessor();
+      const event = makePermAskedEvent({ permission: 'bash', patterns: ['/tmp/test'] });
+      await processor.handleEvent(event);
+      expect(callbacks.onPermissionRequest).toHaveBeenCalled();
+      const perm = callbacks.onPermissionRequest.mock.calls[0][0] as PermissionData;
+      expect(perm.id).toBe('perm-1');
+      expect(perm.sessionID).toBe('ses-1');
+      expect(perm.type).toBe('bash');
+      expect(perm.title).toBe('bash: /tmp/test');
+      expect(perm.pattern).toBe('bash:/tmp/test');
+      expect(processor.currentState).toBe('waiting_permission');
+    });
+
+   it('auto-approves permission.asked when rules match', async () => {
+     const rules = new PermissionRules(
+       [{ pattern: 'bash:/tmp/*', response: 'once' }],
+       'ask',
+     );
+     const { processor, client, callbacks } = createProcessor(rules);
+     const event = makePermAskedEvent({ permission: 'bash', patterns: ['/tmp/test'] });
+     await processor.handleEvent(event);
+     expect(client.respondToPermission).toHaveBeenCalledWith('ses-1', 'perm-1', 'once');
+     expect(callbacks.onPermissionRequest).not.toHaveBeenCalled();
+     expect(processor.currentState).toBe('streaming');
+   });
+
+   it('handles permission.asked auto-approve API failure gracefully', async () => {
+     const rules = new PermissionRules(
+       [{ pattern: 'bash:*', response: 'once' }],
+       'ask',
+     );
+     const { processor, client, callbacks } = createProcessor(rules);
+     (client.respondToPermission as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+       new Error('API error'),
+     );
+     const event = makePermAskedEvent({ permission: 'bash', patterns: ['/tmp/test'] });
+     await processor.handleEvent(event);
+     expect(callbacks.onPermissionRequest).toHaveBeenCalled();
+     expect(processor.currentState).toBe('waiting_permission');
+   });
+
+   it('permission.asked with tool info populates messageID and callID', async () => {
+     const { processor, callbacks } = createProcessor();
+     const event = makePermAskedEvent({
+       permission: 'bash',
+       patterns: ['/tmp/test'],
+       tool: { messageID: 'msg-x', callID: 'call-x' }
+     });
+     await processor.handleEvent(event);
+     expect(callbacks.onPermissionRequest).toHaveBeenCalled();
+     const perm = callbacks.onPermissionRequest.mock.calls[0][0] as PermissionData;
+     expect(perm.messageID).toBe('msg-x');
+     expect(perm.callID).toBe('call-x');
+   });
+
+   it('permission.asked with multiple patterns normalizes pattern to array', async () => {
+     const { processor, callbacks } = createProcessor();
+     const event = makePermAskedEvent({ permission: 'bash', patterns: ['/tmp/a', '/tmp/b'] });
+     await processor.handleEvent(event);
+     expect(callbacks.onPermissionRequest).toHaveBeenCalled();
+     const perm = callbacks.onPermissionRequest.mock.calls[0][0] as PermissionData;
+      expect(perm.pattern).toEqual(['bash:/tmp/a', 'bash:/tmp/b']);
+   });
+ });

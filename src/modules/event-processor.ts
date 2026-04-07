@@ -13,6 +13,37 @@ export type EventProcessorCallbacks = {
   onError: (error: string) => void;
 };
 
+type V2PermissionRequest = {
+  id: string;
+  sessionID: string;
+  permission: string;
+  patterns: string[];
+  metadata: Record<string, unknown>;
+  always: string[];
+  tool?: { messageID: string; callID: string };
+};
+
+function normalizePermission(event: OpenCodeEvent): PermissionData | null {
+  if (event.type === 'permission.asked') {
+    const v2 = event.properties as V2PermissionRequest | undefined;
+    if (!v2?.id) return null;
+    const patterns = Array.isArray(v2.patterns) ? v2.patterns : [];
+    const prefixed = patterns.map((p) => `${v2.permission}:${p}`);
+    return {
+      id: v2.id,
+      sessionID: v2.sessionID,
+      type: v2.permission,
+      title: `${v2.permission}: ${patterns[0] ?? '*'}`,
+      pattern: prefixed.length === 1 ? prefixed[0] : prefixed.length > 1 ? prefixed : `${v2.permission}:*`,
+      metadata: v2.metadata,
+      messageID: v2.tool?.messageID,
+      callID: v2.tool?.callID,
+    };
+  }
+  const props = event.properties as { permission?: PermissionData } | undefined;
+  return props?.permission ?? null;
+}
+
 export class EventProcessor {
   private text = '';
   private state: EventProcessorState = 'streaming';
@@ -38,16 +69,15 @@ export class EventProcessor {
         break;
       }
 
-      case 'permission.updated': {
-        const props = event.properties as {
-          permission?: PermissionData;
-        } | undefined;
-        const perm = props?.permission;
+      case 'permission.updated':
+      case 'permission.asked': {
+        const perm = normalizePermission(event);
         if (!perm) break;
         debug('Permission request received', {
           sessionId: this.sessionId,
           permissionId: perm.id,
           permissionType: perm.type,
+          sourceEvent: event.type,
         });
 
         const decision = this.rules.evaluate(perm);

@@ -39,7 +39,7 @@ export interface ConcurrencyRule {
 
 export interface PermissionData {
   id: string;
-  messageID: string;
+  messageID?: string;
   sessionID: string;
   title: string;
   type: string;

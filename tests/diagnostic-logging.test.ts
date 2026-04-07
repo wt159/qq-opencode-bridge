@@ -4,7 +4,7 @@ import { once } from 'events';
 import { BridgeHandlers } from '../src/modules/handlers.js';
 import { ProcessManager } from '../src/modules/process.js';
 import { SessionManager } from '../src/modules/session.js';
-import { OpenCodeClient } from '../src/services/opencode.js';
+import { OpenCodeClient, type OpenCodeEvent } from '../src/services/opencode.js';
 import { NapCatService } from '../src/services/napcat.js';
 import { initLogger } from '../src/utils/logger.js';
 import type { Config } from '../src/types.js';
@@ -179,6 +179,98 @@ describe('diagnostic logging', () => {
     expect(output).toContain('OpenCode SSE connected');
     expect(output).toContain('handleRun sendMessage start');
     expect(output).toContain('Permission request received');
+
+    server.closeAllConnections();
+    server.close();
+    await Promise.race([
+      runPromise.catch(() => {}),
+      new Promise(r => setTimeout(r, 1000)),
+    ]);
+  }, 10000);
+
+  it('logs permission.asked event (V2) correctly', async () => {
+    let sseRes: ServerResponse | null = null;
+    let sseReadyResolve!: () => void;
+    const sseReady = new Promise<void>((r) => { sseReadyResolve = r; });
+    let postArrivedResolve!: () => void;
+    const postArrived = new Promise<void>((r) => { postArrivedResolve = r; });
+
+    const server = createServer((req, res) => {
+      if (req.method === 'GET' && req.url === '/event') {
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+        });
+        sseRes = res;
+        req.on('close', () => { sseRes = null; });
+        sseReadyResolve();
+        return;
+      }
+
+      if (req.method === 'POST' && req.url?.match(/^\/session\/[^/]+\/message$/)) {
+        postArrivedResolve();
+        return;
+      }
+
+      if (req.method === 'GET' && req.url === '/config/providers') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ providers: [], default: {} }));
+        return;
+      }
+
+      if (req.method === 'POST' && req.url?.match(/^\/session\/[^/]+\/permissions\/[^/]+$/)) {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+
+      res.writeHead(404);
+      res.end();
+    });
+
+    const port = await startOnRandomPort(server);
+    const sessions = new SessionManager();
+    const processes = new ProcessManager([3002, 3010]);
+    const napcat = new MockNapCatService(debugConfig);
+    const handlers = new BridgeHandlers(debugConfig, sessions, processes, napcat);
+
+    sessions.bindProject('123', '/workspace/proj', port, 'ses-1');
+
+    const runPromise = handlers.handleRun('123', 'complex requirement', false);
+
+    await Promise.all([sseReady, postArrived]);
+
+    const sendSSE = (event: object) => {
+      if (sseRes && !sseRes.writableEnded) {
+        sseRes.write(`data: ${JSON.stringify(event)}\n\n`);
+      }
+    };
+
+    const event = {
+      type: 'permission.asked',
+      properties: {
+        sessionID: 'ses-1',
+        id: 'perm-v2',
+        permission: 'external_directory',
+        patterns: ['/home/wtp/*'],
+        metadata: {},
+        always: [],
+      },
+    } as unknown as OpenCodeEvent;
+
+    sendSSE(event);
+
+    await new Promise(r => setTimeout(r, 150));
+
+    const output = logLines.join('');
+    expect(output).toContain('OpenCode SSE connect start');
+    expect(output).toContain('OpenCode SSE connected');
+    expect(output).toContain('handleRun sendMessage start');
+    expect(output).toContain('Permission request received');
+
+    // Verify metadata includes sourceEvent and permissionType
+    expect(output).toContain('"sourceEvent":"permission.asked"');
+    expect(output).toContain('"permissionType":"external_directory"');
 
     server.closeAllConnections();
     server.close();
