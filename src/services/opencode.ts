@@ -1,6 +1,17 @@
 import type { PermissionData } from '../types.js';
 import { debug, warn } from '../utils/logger.js';
 
+class OpenCodeRequestError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly statusText: string,
+  ) {
+    super(message);
+    this.name = 'OpenCodeRequestError';
+  }
+}
+
 export type OpenCodeEvent = {
   type: string;
   properties?: {
@@ -9,6 +20,7 @@ export type OpenCodeEvent = {
     part?: { type: string; text?: string };
     error?: { name?: string; data?: { message?: string } };
     permission?: PermissionData;
+    [key: string]: unknown;
   };
 };
 
@@ -29,13 +41,22 @@ export class OpenCodeClient {
     return headers;
   }
 
-  private async request<T>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal): Promise<T> {
+  private async request<T>(
+    path: string,
+    method = 'GET',
+    body?: unknown,
+    signal?: AbortSignal,
+  ): Promise<T> {
     const url = `${this.baseUrl}${path}`;
     const startedAt = Date.now();
+    const hardTimeout = AbortSignal.timeout(30 * 60 * 1000);
+    const effectiveSignal = signal
+      ? AbortSignal.any([signal, hardTimeout])
+      : hardTimeout;
     const opts: RequestInit = {
       method,
       headers: this.getHeaders(),
-      signal,
+      signal: effectiveSignal,
     };
     if (body) {
       opts.body = JSON.stringify(body);
@@ -45,14 +66,11 @@ export class OpenCodeClient {
       const resp = await fetch(url, opts);
       if (!resp.ok) {
         const text = await resp.text();
-        warn('OpenCode request failed', {
-          method,
-          path,
-          status: resp.status,
-          statusText: resp.statusText,
-          durationMs: Date.now() - startedAt,
-        });
-        throw new Error(`OpenCode API error: ${resp.status} ${resp.statusText} for ${method} ${path}. Body: ${text}`);
+        throw new OpenCodeRequestError(
+          `OpenCode API error: ${resp.status} ${resp.statusText} for ${method} ${path}. Body: ${text}`,
+          resp.status,
+          resp.statusText,
+        );
       }
       if (resp.status === 204) {
         debug('OpenCode request success', { method, path, status: resp.status, durationMs: Date.now() - startedAt });
@@ -117,7 +135,14 @@ export class OpenCodeClient {
   }
 
   async respondToPermission(sessionId: string, permissionId: string, response: 'once' | 'always' | 'reject', remember = false): Promise<void> {
-    return this.request(`/session/${sessionId}/permissions/${permissionId}`, 'POST', { response, remember });
+    try {
+      await this.request(`/permission/${permissionId}/reply`, 'POST', { reply: response });
+    } catch (e) {
+      if (!(e instanceof OpenCodeRequestError) || (e.status !== 404 && e.status !== 405)) {
+        throw e;
+      }
+      await this.request(`/session/${sessionId}/permissions/${permissionId}`, 'POST', { response, remember });
+    }
   }
 
   async listSessions(): Promise<{ id: string; directory: string }[]> {
