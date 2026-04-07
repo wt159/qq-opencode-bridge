@@ -23,6 +23,98 @@ class MockNapCatService extends NapCatService {
   }
 }
 
+let sessions: SessionManager;
+let napcat: MockNapCatService;
+
+// Helper functions shared across test suites
+function createMockOpenCodeServer() {
+  let sseRes: ServerResponse | null = null;
+  let sseReadyResolve!: () => void;
+  const sseReady = new Promise<void>((r) => { sseReadyResolve = r; });
+
+  let messageReadyResolve!: () => void;
+  const messageReady = new Promise<void>((r) => { messageReadyResolve = r; });
+
+  const permissionCalls: Array<{ sessionId: string; permissionId: string; body: string }> = [];
+
+  const server = createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/event') {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+      });
+      sseRes = res;
+      req.on('close', () => { sseRes = null; });
+      sseReadyResolve();
+      return;
+    }
+
+    if (req.method === 'POST' && req.url?.match(/^\/session\/[^/]+\/message$/)) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ parts: [] }));
+      messageReadyResolve();
+      return;
+    }
+
+    if (req.method === 'POST' && req.url?.match(/^\/session\/[^/]+\/permissions\/[^/]+$/)) {
+      let body = '';
+      req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+      req.on('end', () => {
+        const match = req.url!.match(/^\/session\/([^/]+)\/permissions\/([^/]+)$/);
+        permissionCalls.push({ sessionId: match![1], permissionId: match![2], body });
+        res.writeHead(204);
+        res.end();
+      });
+      return;
+    }
+
+    if (req.method === 'POST' && req.url?.match(/^\/session\/[^/]+\/abort$/)) {
+      res.writeHead(204);
+      res.end();
+      if (sseRes && !sseRes.writableEnded) {
+        sseRes.end();
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && req.url === '/config/providers') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ providers: [], default: {} }));
+      return;
+    }
+
+    res.writeHead(404);
+    res.end();
+  });
+
+  function sendSSE(event: object) {
+    if (sseRes && !sseRes.writableEnded) {
+      sseRes.write(`data: ${JSON.stringify(event)}\n\n`);
+    }
+  }
+
+  return { server, sendSSE, sseReady, messageReady, permissionCalls };
+}
+
+async function waitForState(qq: string, state: SessionState, timeout = 3000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    if (sessions.getOrCreate(qq).state === state) return;
+    await new Promise(r => setTimeout(r, 20));
+  }
+  throw new Error(`Timed out waiting for state '${state}', current: '${sessions.getOrCreate(qq).state}'`);
+}
+
+function getLastReplyText(): string {
+  const last = napcat.messages.at(-1);
+  if (!last) return '';
+  if (Array.isArray(last.message)) {
+    const first = last.message[0] as { type: string; data: { text: string } } | undefined;
+    return first?.data?.text ?? '';
+  }
+  return '';
+}
+
 describe('BridgeHandlers unbind', () => {
   const config: Config = {
     whitelist: ['123'],
@@ -47,9 +139,7 @@ describe('BridgeHandlers unbind', () => {
     },
   };
 
-  let sessions: SessionManager;
   let processes: ProcessManager;
-  let napcat: MockNapCatService;
   let handlers: BridgeHandlers;
 
   beforeEach(() => {
@@ -643,6 +733,111 @@ describe('BridgeHandlers permission integration', () => {
     expect(abortMsg).toContain('已中断');
 
     try { await runPromise; } catch { /* expected after abort */ }
+    mock.server.close();
+  });
+
+  it('handles permission.asked event (V2) and allows approve', async () => {
+    const mock = createMockOpenCodeServer();
+    mock.server.listen(0, '127.0.0.1');
+    await once(mock.server, 'listening');
+    const port = (mock.server.address() as { port: number }).port;
+
+    sessions.bindProject('123', '/workspace/proj', port, 'ses-1');
+
+    const runPromise = handlers.handleRun('123', 'test task', false);
+
+    await Promise.all([mock.sseReady, mock.messageReady]);
+
+    mock.sendSSE({
+      type: 'message.part.updated',
+      properties: { sessionID: 'ses-1', part: { type: 'text', text: 'Working...' } },
+    });
+    await new Promise(r => setTimeout(r, 50));
+
+    mock.sendSSE({
+      type: 'permission.asked',
+      properties: {
+        sessionID: 'ses-1',
+        id: 'perm-v2-approve',
+        permission: 'bash',
+        patterns: ['Run command: rm -rf /'],
+        metadata: {},
+        always: [],
+      },
+    });
+
+    await waitForState('123', 'permission_pending');
+
+    const permMsg = napcat.messages.find(m => {
+      const text = Array.isArray(m.message) ? (m.message[0] as { data: { text: string } })?.data?.text : '';
+      return text?.includes('权限请求');
+    });
+    expect(permMsg).toBeDefined();
+
+    await handlers.handlePermission('123', true, false);
+
+    expect(mock.permissionCalls.length).toBe(1);
+    expect(mock.permissionCalls[0].permissionId).toBe('perm-v2-approve');
+    const body = JSON.parse(mock.permissionCalls[0].body);
+    expect(body.response).toBe('once');
+
+    const approveMsg = getLastReplyText();
+    expect(approveMsg).toContain('已授权');
+
+    expect(sessions.getOrCreate('123').state).toBe('running');
+
+    mock.sendSSE({
+      type: 'session.idle',
+      properties: { sessionID: 'ses-1' },
+    });
+
+    await runPromise;
+    expect(sessions.getOrCreate('123').state).toBe('idle');
+
+    mock.server.close();
+  });
+
+  it('handles permission.asked event (V2) and allows reject', async () => {
+    const mock = createMockOpenCodeServer();
+    mock.server.listen(0, '127.0.0.1');
+    await once(mock.server, 'listening');
+    const port = (mock.server.address() as { port: number }).port;
+
+    sessions.bindProject('123', '/workspace/proj', port, 'ses-1');
+
+    const runPromise = handlers.handleRun('123', 'test task', false);
+
+    await Promise.all([mock.sseReady, mock.messageReady]);
+
+    mock.sendSSE({
+      type: 'permission.asked',
+      properties: {
+        sessionID: 'ses-1',
+        id: 'perm-v2-reject',
+        permission: 'bash',
+        patterns: ['Run command: dangerous cmd'],
+        metadata: {},
+        always: [],
+      },
+    });
+
+    await waitForState('123', 'permission_pending');
+
+    await handlers.handlePermission('123', false, false);
+
+    expect(mock.permissionCalls.length).toBe(1);
+    const body = JSON.parse(mock.permissionCalls[0].body);
+    expect(body.response).toBe('reject');
+
+    const rejectMsg = getLastReplyText();
+    expect(rejectMsg).toContain('已拒绝');
+
+    mock.sendSSE({
+      type: 'session.idle',
+      properties: { sessionID: 'ses-1' },
+    });
+
+    await runPromise;
     mock.server.close();
   });
 });

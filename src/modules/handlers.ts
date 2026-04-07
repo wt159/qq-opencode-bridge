@@ -31,6 +31,8 @@ export class BridgeHandlers {
 
   private activeProcessors = new Map<string, EventProcessor>();
 
+  private cancelledRuns = new Set<string>();
+
   private get permissionRules(): PermissionRules {
     const perms = this.config.permissions;
     return new PermissionRules(
@@ -280,16 +282,19 @@ export class BridgeHandlers {
     });
     await this.reply(qq, '正在执行...', isGroup, groupId);
 
+    let responseReady = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+
     try {
       const client = this.getClient(qq);
       const model = await this.resolveRunModel(qq);
       const events = client.subscribeEvents(s.sessionId!);
       const eventIterator = events[Symbol.asyncIterator]();
 
-      let responseReady = false;
       const timeoutMs = Math.max(this.config.opencode.commandTimeout, 30 * 60 * 1000);
-      const timeout = setTimeout(() => {
+      timeout = setTimeout(() => {
         if (!responseReady) {
+          this.cancelledRuns.add(qq);
           warn('handleRun timeout', {
             qq,
             sessionId: s.sessionId,
@@ -353,17 +358,23 @@ export class BridgeHandlers {
           }
         } catch (e) {
           const message = e instanceof Error ? e.message : String(e);
-          warn('handleRun event loop failed', {
-            qq,
-            sessionId: s.sessionId,
-            responseReady,
-            state: s.state,
-            error: message,
-          });
-          if (!responseReady) {
+          if (events.controller.signal.aborted && responseReady) {
+            debug('handleRun SSE aborted after response delivered', { qq, sessionId: s.sessionId });
+          } else if (this.cancelledRuns.has(qq)) {
+            debug('handleRun SSE aborted after cancellation', { qq, sessionId: s.sessionId, message });
+          } else if (!responseReady) {
+            warn('handleRun event loop failed', {
+              qq,
+              sessionId: s.sessionId,
+              responseReady,
+              state: s.state,
+              error: message,
+            });
             this.reply(qq, `执行失败: ${message}`, isGroup, groupId);
           }
         } finally {
+          clearTimeout(timeout);
+          this.cancelledRuns.delete(qq);
           events.controller.abort();
           this.activeProcessors.delete(qq);
         }
@@ -386,6 +397,7 @@ export class BridgeHandlers {
         });
       };
 
+      const sendStartTime = Date.now();
       try {
         await sendWithModel(model);
       } catch (e) {
@@ -398,8 +410,22 @@ export class BridgeHandlers {
           } else {
             throw e;
           }
-        } else {
+        } else if (responseReady) {
+          debug('handleRun POST failed after response delivered', {
+            qq,
+            sessionId: s.sessionId,
+            elapsedMs: Date.now() - sendStartTime,
+            error: message,
+          });
+        } else if (Date.now() - sendStartTime < 30_000) {
           throw e;
+        } else {
+          warn('handleRun POST timed out, delegating to SSE', {
+            qq,
+            sessionId: s.sessionId,
+            elapsedMs: Date.now() - sendStartTime,
+            error: message,
+          });
         }
       }
 
@@ -407,6 +433,7 @@ export class BridgeHandlers {
 
       s.state = 'idle';
     } catch (e) {
+      if (timeout) clearTimeout(timeout);
       warn('handleRun failed', {
         qq,
         sessionId: s.sessionId,
@@ -426,6 +453,7 @@ export class BridgeHandlers {
     }
 
     s.state = 'aborting';
+    this.cancelledRuns.add(qq);
     try {
       const client = this.getClient(qq);
       await client.abort(s.sessionId!);
@@ -434,6 +462,7 @@ export class BridgeHandlers {
       this.activeProcessors.delete(qq);
       return this.reply(qq, '已中断', isGroup, groupId);
     } catch (e) {
+      this.cancelledRuns.delete(qq);
       s.state = 'idle';
       s.pendingPermissionId = null;
       this.activeProcessors.delete(qq);
